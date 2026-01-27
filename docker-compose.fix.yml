@@ -1,4 +1,4 @@
-version: '3.7'
+version: '3.8'
 
 services:
   db:
@@ -41,12 +41,8 @@ services:
       OWNER_PASSWORD: ${OWNER_PASSWORD:-}
       OWNER_FULL_NAME: ${OWNER_FULL_NAME:-}
     volumes:
-      - type: bind
-        source: ./profile_photos
-        target: /app/profile_photos
-      - type: bind
-        source: ./achievements
-        target: /app/achievements
+      - profile_photos_data:/app/profile_photos
+      - achievements_data:/app/achievements
     ports:
       - "${APP_PORT:-8001}:8001"
     networks:
@@ -64,6 +60,8 @@ services:
 
 volumes:
   mysql_data:
+  profile_photos_data:
+  achievements_data:
 
 networks:
   gradebook_network:

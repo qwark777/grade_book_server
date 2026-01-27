@@ -1,4 +1,4 @@
-version: '3.7'
+version: '3.8'
 
 services:
   db:
@@ -13,24 +13,21 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
     ports:
-      - "${MYSQL_PORT:-3306}:3306"
+      - "3306:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - gradebook_network
 
   app:
     build: .
     container_name: gradebook_server
     restart: unless-stopped
     depends_on:
-      db:
-        condition: service_healthy
+      - db
     environment:
-      MYSQL_HOST: ${MYSQL_HOST:-db}
+      MYSQL_HOST: db
       MYSQL_USER: ${MYSQL_USER:-gradebook_user}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-gradebook_password}
       MYSQL_DB: ${MYSQL_DB:-grade_book}
@@ -41,30 +38,19 @@ services:
       OWNER_PASSWORD: ${OWNER_PASSWORD:-}
       OWNER_FULL_NAME: ${OWNER_FULL_NAME:-}
     volumes:
-      - type: bind
-        source: ./profile_photos
-        target: /app/profile_photos
-      - type: bind
-        source: ./achievements
-        target: /app/achievements
+      - profile_photos_data:/app/profile_photos
+      - achievements_data:/app/achievements
     ports:
-      - "${APP_PORT:-8001}:8001"
-    networks:
-      - gradebook_network
+      - "8001:8001"
     command: >
       sh -c "
-        echo 'Waiting for database to be ready...' &&
-        sleep 5 &&
+        sleep 10 &&
         python -c 'import asyncio; from app.db.connection import init_db; asyncio.run(init_db())' &&
-        echo 'Database initialized!' &&
         python scripts/auto_create_owner.py &&
-        echo 'Starting server...' &&
         python main_new.py
       "
 
 volumes:
   mysql_data:
-
-networks:
-  gradebook_network:
-    driver: bridge
+  profile_photos_data:
+  achievements_data:
