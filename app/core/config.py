@@ -30,14 +30,22 @@ class Settings:
 
 settings = Settings()
 
-# Set MYSQL_PASSWORD: In Docker, if connecting as root and MYSQL_PASSWORD is not set, use MYSQL_ROOT_PASSWORD
+# Set MYSQL_PASSWORD
+# In Docker: docker-compose.yml sets MYSQL_PASSWORD=${MYSQL_ROOT_PASSWORD} for root user
+# For local dev: use MYSQL_PASSWORD or fallback to MYSQL_ROOT_PASSWORD if root, else default
 _mysql_password = os.getenv("MYSQL_PASSWORD")
 _mysql_root_password = os.getenv("MYSQL_ROOT_PASSWORD")
 _mysql_user = os.getenv("MYSQL_USER", "root")
-if _mysql_user == "root" and not _mysql_password and _mysql_root_password:
+
+if _mysql_password:
+    # Docker Compose already sets correct password, or user explicitly set it
+    settings.MYSQL_PASSWORD = _mysql_password
+elif _mysql_user == "root" and _mysql_root_password:
+    # Local dev: connecting as root, use root password
     settings.MYSQL_PASSWORD = _mysql_root_password
 else:
-    settings.MYSQL_PASSWORD = _mysql_password or "12345678"
+    # Default fallback
+    settings.MYSQL_PASSWORD = "12345678"
 
 # Create profile photos directory if it doesn't exist
 os.makedirs(settings.PROFILE_PHOTOS_DIR, exist_ok=True)
