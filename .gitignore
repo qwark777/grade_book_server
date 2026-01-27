@@ -36,6 +36,8 @@ env/
 # Environment variables
 .env
 .env.local
+# .env.test - разрешен для коммита (тестовые данные)
+!.env.test
 
 # Logs
 *.log

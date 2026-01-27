@@ -31,7 +31,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      MYSQL_HOST: db
+      MYSQL_HOST: ${MYSQL_HOST:-db}
       MYSQL_USER: ${MYSQL_USER:-gradebook_user}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-gradebook_password}
       MYSQL_DB: ${MYSQL_DB:-grade_book}
