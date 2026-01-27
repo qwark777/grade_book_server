@@ -12,7 +12,8 @@ class Settings:
     ENCRYPTION_KEY: str = "ICkoftk-wbOx89vzo2nuGkPatHZCQ1IKBVpFdRJ1F4k="
     
     # Database Configuration
-    MYSQL_HOST: str = os.getenv("MYSQL_HOST", "localhost")
+    # Default to 'db' for Docker, override with MYSQL_HOST env var for local development
+    MYSQL_HOST: str = os.getenv("MYSQL_HOST", "db")
     MYSQL_USER: str = os.getenv("MYSQL_USER", "root")
     MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "12345678")
     MYSQL_DB: str = os.getenv("MYSQL_DB", "grade_book")
