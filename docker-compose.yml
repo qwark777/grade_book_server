@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: gradebook_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DB:-grade_book}
+      MYSQL_USER: ${MYSQL_USER:-gradebook_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-gradebook_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gradebook_network
+
+  app:
+    build: .
+    container_name: gradebook_server
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: db
+      MYSQL_USER: ${MYSQL_USER:-gradebook_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-gradebook_password}
+      MYSQL_DB: ${MYSQL_DB:-grade_book}
+      MYSQL_PORT: 3306
+      SECRET_KEY: ${SECRET_KEY:-304f1388f317fe2e917a1df468144def7f60586ba96dc80b07d26c68cae00fab}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-ICkoftk-wbOx89vzo2nuGkPatHZCQ1IKBVpFdRJ1F4k=}
+      OWNER_USERNAME: ${OWNER_USERNAME:-owner}
+      OWNER_PASSWORD: ${OWNER_PASSWORD:-}
+      OWNER_FULL_NAME: ${OWNER_FULL_NAME:-}
+    volumes:
+      - ./profile_photos:/app/profile_photos
+      - ./achievements:/app/achievements
+    ports:
+      - "${APP_PORT:-8001}:8001"
+    networks:
+      - gradebook_network
+    command: >
+      sh -c "
+        echo 'Waiting for database to be ready...' &&
+        sleep 5 &&
+        python -c 'import asyncio; from app.db.connection import init_db; asyncio.run(init_db())' &&
+        echo 'Database initialized!' &&
+        python scripts/auto_create_owner.py &&
+        echo 'Starting server...' &&
+        python main_new.py
+      "
+
+volumes:
+  mysql_data:
+
+networks:
+  gradebook_network:
+    driver: bridge
