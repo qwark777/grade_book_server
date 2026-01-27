@@ -15,7 +15,7 @@ class Settings:
     # Default to 'db' for Docker, override with MYSQL_HOST env var for local development
     MYSQL_HOST: str = os.getenv("MYSQL_HOST", "db")
     MYSQL_USER: str = os.getenv("MYSQL_USER", "root")
-    MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "12345678")
+    # MYSQL_PASSWORD will be set after class definition
     MYSQL_DB: str = os.getenv("MYSQL_DB", "grade_book")
     MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", "3306"))
     
@@ -29,6 +29,15 @@ class Settings:
 
 
 settings = Settings()
+
+# Set MYSQL_PASSWORD: In Docker, if connecting as root and MYSQL_PASSWORD is not set, use MYSQL_ROOT_PASSWORD
+_mysql_password = os.getenv("MYSQL_PASSWORD")
+_mysql_root_password = os.getenv("MYSQL_ROOT_PASSWORD")
+_mysql_user = os.getenv("MYSQL_USER", "root")
+if _mysql_user == "root" and not _mysql_password and _mysql_root_password:
+    settings.MYSQL_PASSWORD = _mysql_root_password
+else:
+    settings.MYSQL_PASSWORD = _mysql_password or "12345678"
 
 # Create profile photos directory if it doesn't exist
 os.makedirs(settings.PROFILE_PHOTOS_DIR, exist_ok=True)

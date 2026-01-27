@@ -32,7 +32,8 @@ services:
     environment:
       MYSQL_HOST: ${MYSQL_HOST:-db}
       MYSQL_USER: ${MYSQL_USER:-root}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-12345678}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-${MYSQL_ROOT_PASSWORD:-rootpassword}}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
       MYSQL_DB: ${MYSQL_DB:-grade_book}
       MYSQL_PORT: 3306
       SECRET_KEY: ${SECRET_KEY:-304f1388f317fe2e917a1df468144def7f60586ba96dc80b07d26c68cae00fab}
@@ -50,10 +51,7 @@ services:
     command: >
       sh -c "
         echo '⏳ Waiting for database to be ready...' &&
-        sleep 15 &&
-        echo '🔍 Checking database connection...' &&
-        python -c 'import asyncio, sys; from app.db.connection import get_db_connection; asyncio.run(get_db_connection().close())' 2>&1 || echo '⚠️  First connection attempt failed, will retry...' &&
-        sleep 5 &&
+        sleep 20 &&
         echo '🔧 Initializing database...' &&
         python -c 'import asyncio; from app.db.connection import init_db; asyncio.run(init_db())' &&
         echo '✅ Database initialized!' &&

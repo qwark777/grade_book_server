@@ -7,11 +7,17 @@
 - Docker (версия 20.10 или выше)
 - Docker Compose (версия 2.0 или выше)
 
+**⚠️ ВАЖНО:** MySQL НЕ нужно устанавливать на хосте! Docker Compose автоматически установит MySQL в контейнере.
+
 Проверьте установку:
 ```bash
 docker --version
+docker compose version
+# или
 docker-compose --version
 ```
+
+📖 Подробная инструкция по установке Docker: [PREREQUISITES.md](PREREQUISITES.md)
 
 ## Быстрый старт
 

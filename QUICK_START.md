@@ -2,6 +2,21 @@
 
 Развертывание сервера одной командой!
 
+**⚠️ ВАЖНО:** MySQL НЕ нужно устанавливать! Docker установит его автоматически.
+
+## Требования
+
+- Docker (версия 20.10+)
+- Docker Compose (версия 2.0+)
+
+Проверь установку:
+```bash
+docker --version
+docker compose version
+```
+
+📖 Инструкция по установке Docker: [PREREQUISITES.md](PREREQUISITES.md)
+
 ## Шаг 1: Настройка
 
 ```bash
