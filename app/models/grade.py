@@ -19,6 +19,7 @@ class Homework(BaseModel):
 
 
 class Subject(BaseModel):
+    id: Optional[int] = None
     name: str
     coefficient: float = 1.0
 
@@ -27,6 +28,7 @@ class ClassItem(BaseModel):
     id: int
     name: str
     student_count: int
+    is_archived: bool = False
 
 
 class StudentResponse(BaseModel):

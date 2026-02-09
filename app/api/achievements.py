@@ -168,13 +168,19 @@ async def get_all_achievements(current_user=Depends(get_current_user)):
         conn.close()
 
 
+def _check_admin_or_owner(current_user):
+    role = current_user.get("role", "") if isinstance(current_user, dict) else getattr(current_user, "role", "")
+    if role not in ("admin", "owner", "superadmin"):
+        raise HTTPException(status_code=403, detail="Только админ или владелец может выполнить это действие")
+
+
 @router.post("/achievements/create")
 async def create_achievement(
     request: CreateAchievementRequest,
     current_user=Depends(get_current_user)
 ):
     """Создать новое достижение в каталоге (только для админов/владельцев)"""
-    # TODO: Добавить проверку прав доступа
+    _check_admin_or_owner(current_user)
     conn = await get_db_connection()
     try:
         async with conn.cursor(aiomysql.DictCursor) as cursor:
@@ -214,7 +220,7 @@ async def award_achievement_to_user(
     current_user=Depends(get_current_user)
 ):
     """Выдать достижение пользователю (только для админов/владельцев)"""
-    # TODO: Добавить проверку прав доступа
+    _check_admin_or_owner(current_user)
     conn = await get_db_connection()
     try:
         async with conn.cursor(aiomysql.DictCursor) as cursor:
@@ -249,8 +255,8 @@ async def upload_achievement_photo(
     achievement_code: str = None,
     current_user=Depends(get_current_user)
 ):
-    """Загрузить фото для достижения"""
-    # TODO: Добавить проверку прав доступа (только админы/владельцы)
+    """Загрузить фото для достижения (только админы/владельцы)"""
+    _check_admin_or_owner(current_user)
     
     ext = file.filename.split(".")[-1].lower() if file.filename else "png"
     if ext not in ["jpg", "jpeg", "png", "webp", "gif"]:

@@ -28,6 +28,36 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # Log login (background)
+    import asyncio
+    async def _log():
+        from app.db.connection import get_db_connection
+        conn = await get_db_connection()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT school_id FROM school_admins WHERE admin_user_id = %s LIMIT 1",
+                    (user.id,)
+                )
+                r = await cur.fetchone()
+                sid = r["school_id"] if r and isinstance(r, dict) else None
+                if sid is None:
+                    await cur.execute(
+                        "SELECT c.school_id FROM class_students cs JOIN classes c ON c.id = cs.class_id WHERE cs.student_id = %s LIMIT 1",
+                        (user.id,)
+                    )
+                    r = await cur.fetchone()
+                    sid = r["school_id"] if r and isinstance(r, dict) else None
+                await cur.execute(
+                    "INSERT INTO login_log (user_id, school_id) VALUES (%s, %s)",
+                    (user.id, sid)
+                )
+                await conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+    asyncio.create_task(_log())
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 

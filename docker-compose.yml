@@ -43,6 +43,7 @@ services:
     volumes:
       - profile_photos_data:/app/profile_photos
       - achievements_data:/app/achievements
+      - homework_submissions_data:/app/homework_submissions
     ports:
       - "${APP_PORT:-8001}:8001"
     networks:
@@ -66,6 +67,7 @@ volumes:
   mysql_data:
   profile_photos_data:
   achievements_data:
+  homework_submissions_data:
 
 networks:
   gradebook_network:

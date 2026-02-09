@@ -1,13 +1,30 @@
 from datetime import date, datetime, timedelta
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from app.core.security import get_current_user
+from app.core.entitlements import get_school_id_for_user
 from app.db.connection import get_db_connection
-from app.db.timetable_operations import get_week_schedule, get_rooms, create_timetable_change, create_holiday, get_teacher_week_schedule
+from app.db.timetable_operations import get_week_schedule, get_rooms, create_timetable_change, create_holiday, get_holidays, delete_holiday, get_teacher_week_schedule
+from app.db.timetable_generator import CurriculumItem, generate_timetable, PlacedLesson
 from app.models.timetable import WeekSchedule, Room, CreateTimetableChangeRequest, CreateHolidayRequest, TimetableTemplateRequest
 
 router = APIRouter()
+
+
+class CurriculumEntry(BaseModel):
+    class_id: int
+    subject_id: int
+    hours_per_week: int
+
+
+class CurriculumSaveRequest(BaseModel):
+    entries: List[CurriculumEntry]
+
+
+class GenerateRequest(BaseModel):
+    academic_period_id: Optional[int] = None
 
 
 @router.get("/timetable/week", response_model=WeekSchedule)
@@ -151,12 +168,13 @@ async def get_timetable_template(
                 
                 # Преобразуем в формат LessonTemplateData
                 lessons = []
+                from app.db.timetable_operations import _format_time
                 for row in rows:
                     lessons.append({
                         "day_of_week": row['day_of_week'],
                         "lesson_number": row['lesson_number'],
-                        "start_time": str(row['start_time']),
-                        "end_time": str(row['end_time']),
+                        "start_time": _format_time(row['start_time']),
+                        "end_time": _format_time(row['end_time']),
                         "subject": row['subject_name'] or "",
                         "teacher": row['teacher_name'] or "",
                         "room": row['room_name'] or ""
@@ -311,6 +329,27 @@ async def create_timetable_change_endpoint(
         raise HTTPException(status_code=500, detail="Ошибка при создании замены")
 
 
+@router.get("/holidays")
+async def list_holidays(
+    date_from: str = Query(None, description="Начало периода (YYYY-MM-DD)"),
+    date_to: str = Query(None, description="Конец периода (YYYY-MM-DD)"),
+    current_user=Depends(get_current_user),
+):
+    """Список праздников и каникул."""
+    d_from = datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else None
+    d_to = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else None
+    return await get_holidays(d_from, d_to)
+
+
+@router.delete("/holidays/{holiday_id}")
+async def delete_holiday_endpoint(holiday_id: int, current_user=Depends(get_current_user)):
+    """Удалить праздник."""
+    ok = await delete_holiday(holiday_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Праздник не найден")
+    return {"message": "Праздник удалён"}
+
+
 @router.post("/holidays")
 async def create_holiday_endpoint(
     holiday_data: CreateHolidayRequest,
@@ -329,6 +368,185 @@ async def create_holiday_endpoint(
         return {"message": "Праздник создан успешно"}
     else:
         raise HTTPException(status_code=500, detail="Ошибка при создании праздника")
+
+
+@router.get("/timetable/curriculum")
+async def get_curriculum(
+    school_id: Optional[int] = Query(None),
+    current_user=Depends(get_current_user)
+):
+    """Получить учебный план (часы в неделю по классам и предметам) для школы."""
+    role = current_user.get("role", "") if isinstance(current_user, dict) else getattr(current_user, "role", "")
+    if role not in ("admin", "owner", "superadmin", "root"):
+        raise HTTPException(403, "Forbidden")
+
+    class _U:
+        def __init__(self, id_, role_):
+            self.id = id_
+            self.role = role_
+    uid = current_user.get("id") if isinstance(current_user, dict) else getattr(current_user, "id", None)
+    sid = await get_school_id_for_user(_U(uid, role))
+    if sid is None:
+        sid = school_id
+    if sid is None:
+        raise HTTPException(400, "Укажите school_id")
+
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute("""
+                SELECT c.class_id, c.subject_id, c.hours_per_week, s.name as subject_name,
+                       cl.name as class_name, cst.teacher_id,
+                       COALESCE(p.full_name, u.username) as teacher_name
+                FROM curriculum c
+                JOIN classes cl ON cl.id = c.class_id AND cl.school_id = %s
+                LEFT JOIN subjects s ON s.id = c.subject_id
+                LEFT JOIN class_subject_teachers cst ON cst.class_id = c.class_id AND cst.subject_id = c.subject_id
+                LEFT JOIN users u ON u.id = cst.teacher_id
+                LEFT JOIN profiles p ON p.user_id = u.id
+                ORDER BY cl.name, s.name
+            """, (sid,))
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "class_id": r["class_id"], "subject_id": r["subject_id"],
+                    "hours_per_week": r["hours_per_week"], "subject_name": r.get("subject_name"),
+                    "class_name": r.get("class_name"), "teacher_id": r.get("teacher_id"),
+                    "teacher_name": r.get("teacher_name"),
+                }
+                for r in rows
+            ]
+    finally:
+        conn.close()
+
+
+@router.post("/timetable/curriculum")
+async def save_curriculum(
+    payload: CurriculumSaveRequest,
+    school_id: Optional[int] = Query(None),
+    current_user=Depends(get_current_user)
+):
+    """Сохранить учебный план. Перезаписывает часы для указанных пар (class_id, subject_id)."""
+    role = current_user.get("role", "") if isinstance(current_user, dict) else getattr(current_user, "role", "")
+    if role not in ("admin", "owner", "superadmin"):
+        raise HTTPException(403, "Forbidden")
+    from app.models.user import User
+    class _U:
+        def __init__(self, id_, role_):
+            self.id = id_
+            self.role = role_
+    uid = current_user.get("id") if isinstance(current_user, dict) else getattr(current_user, "id", None)
+    sid = await get_school_id_for_user(_U(uid, role))
+    if sid is None:
+        sid = school_id
+    if sid is None:
+        raise HTTPException(400, "Укажите school_id")
+
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cursor:
+            # Полная замена: удаляем старые записи школы, затем вставляем новые
+            await cursor.execute("""
+                DELETE c FROM curriculum c
+                INNER JOIN classes cl ON cl.id = c.class_id AND cl.school_id = %s
+            """, (sid,))
+            for e in payload.entries:
+                await cursor.execute("""
+                    INSERT INTO curriculum (class_id, subject_id, hours_per_week, school_id)
+                    VALUES (%s, %s, %s, %s)
+                """, (e.class_id, e.subject_id, e.hours_per_week, sid))
+            await conn.commit()
+            return {"message": "Учебный план сохранён", "count": len(payload.entries)}
+    finally:
+        conn.close()
+
+
+@router.post("/timetable/generate")
+async def generate_timetable_endpoint(
+    payload: GenerateRequest,
+    school_id: Optional[int] = Query(None),
+    current_user=Depends(get_current_user)
+):
+    """Автогенерация расписания по учебному плану для всех классов школы."""
+    role = current_user.get("role", "") if isinstance(current_user, dict) else getattr(current_user, "role", "")
+    if role not in ("admin", "owner", "superadmin"):
+        raise HTTPException(403, "Forbidden")
+    from app.models.user import User
+    class _U:
+        def __init__(self, id_, role_):
+            self.id = id_
+            self.role = role_
+    uid = current_user.get("id") if isinstance(current_user, dict) else getattr(current_user, "id", None)
+    sid = await get_school_id_for_user(_U(uid, role))
+    if sid is None:
+        sid = school_id
+    if sid is None:
+        raise HTTPException(400, "Укажите school_id")
+
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cursor:
+            period_id = payload.academic_period_id
+            if not period_id:
+                await cursor.execute("SELECT id FROM academic_periods WHERE is_active = TRUE LIMIT 1")
+                pr = await cursor.fetchone()
+                if not pr:
+                    await cursor.execute("SELECT id FROM academic_periods ORDER BY id DESC LIMIT 1")
+                    pr = await cursor.fetchone()
+                period_id = pr["id"] if pr and isinstance(pr, dict) else (pr[0] if pr else None)
+            if not period_id:
+                raise HTTPException(400, "Нет учебного периода. Создайте период в разделе «Учебные периоды».")
+
+            await cursor.execute("""
+                SELECT c.class_id, c.subject_id, c.hours_per_week, cst.teacher_id
+                FROM curriculum c
+                JOIN classes cl ON cl.id = c.class_id AND cl.school_id = %s AND COALESCE(cl.is_archived, 0) = 0
+                LEFT JOIN class_subject_teachers cst ON cst.class_id = c.class_id AND cst.subject_id = c.subject_id
+                WHERE c.hours_per_week > 0
+            """, (sid,))
+            rows = await cursor.fetchall()
+            items = []
+            for r in rows:
+                tid = r.get("teacher_id") if isinstance(r, dict) else r[3]
+                if not tid:
+                    continue
+                items.append(CurriculumItem(
+                    class_id=r["class_id"] if isinstance(r, dict) else r[0],
+                    subject_id=r["subject_id"] if isinstance(r, dict) else r[1],
+                    teacher_id=tid,
+                    hours_per_week=r["hours_per_week"] if isinstance(r, dict) else r[2],
+                ))
+
+            if not items:
+                raise HTTPException(400, "Нет данных в учебном плане с назначенными учителями. Заполните план и назначьте учителей на предметы.")
+
+            lessons = generate_timetable(items)
+
+            await cursor.execute("SELECT id FROM rooms WHERE is_active = TRUE LIMIT 1")
+            room_row = await cursor.fetchone()
+            default_room = room_row["id"] if room_row and isinstance(room_row, dict) else (room_row[0] if room_row else None)
+
+            for cls in set(l.class_id for l in lessons):
+                await cursor.execute(
+                    "DELETE FROM timetable_templates WHERE class_id = %s AND academic_period_id = %s",
+                    (cls, period_id)
+                )
+
+            for L in lessons:
+                await cursor.execute("""
+                    INSERT INTO timetable_templates
+                    (class_id, subject_id, teacher_id, room_id, day_of_week, lesson_number, start_time, end_time, week_type, academic_period_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'BOTH', %s)
+                """, (
+                    L.class_id, L.subject_id, L.teacher_id,
+                    L.room_id or default_room,
+                    L.day_of_week, L.lesson_number, L.start_time, L.end_time,
+                    period_id
+                ))
+            await conn.commit()
+            return {"message": "Расписание сгенерировано", "lessons_created": len(lessons)}
+    finally:
+        conn.close()
 
 
 @router.get("/timetable/week-info")

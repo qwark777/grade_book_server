@@ -113,6 +113,8 @@ class LessonItem(BaseModel):
     room: str
     change_type: Optional[ChangeType] = None
     change_reason: Optional[str] = None
+    class_id: Optional[int] = None  # для учителя: ID класса
+    subject_id: Optional[int] = None  # для учителя: ID предмета
 
 
 class DaySchedule(BaseModel):

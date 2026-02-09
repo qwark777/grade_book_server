@@ -160,6 +160,19 @@ async def init_db():
                     FOREIGN KEY (teacher_id) REFERENCES users(id)
                 )
             ''')
+            # Homework submissions (фото/файлы от учеников)
+            await cursor.execute('''
+                CREATE TABLE IF NOT EXISTS homework_submissions (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    homework_id INT NOT NULL,
+                    student_id INT NOT NULL,
+                    file_path VARCHAR(512) NOT NULL,
+                    file_name VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (homework_id) REFERENCES homeworks(id) ON DELETE CASCADE,
+                    FOREIGN KEY (student_id) REFERENCES users(id)
+                )
+            ''')
             
             # Conversations table
             await cursor.execute('''
@@ -504,6 +517,19 @@ async def init_db():
                 ''')
             except Exception:
                 pass  # Index already exists
+
+            # Teacher notes about students
+            await cursor.execute('''
+                CREATE TABLE IF NOT EXISTS teacher_student_notes (
+                    teacher_id INT NOT NULL,
+                    student_id INT NOT NULL,
+                    note TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (teacher_id, student_id),
+                    FOREIGN KEY (teacher_id) REFERENCES users(id),
+                    FOREIGN KEY (student_id) REFERENCES users(id)
+                )
+            ''')
             
             # User balance table
             await cursor.execute('''

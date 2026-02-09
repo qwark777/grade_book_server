@@ -12,8 +12,8 @@ class Settings:
     ENCRYPTION_KEY: str = "ICkoftk-wbOx89vzo2nuGkPatHZCQ1IKBVpFdRJ1F4k="
     
     # Database Configuration
-    # Default to 'db' for Docker, override with MYSQL_HOST env var for local development
-    MYSQL_HOST: str = os.getenv("MYSQL_HOST", "db")
+    # Default to 'localhost' for local run (python main_new.py). In Docker, set MYSQL_HOST=db in docker-compose.
+    MYSQL_HOST: str = os.getenv("MYSQL_HOST", "localhost")
     MYSQL_USER: str = os.getenv("MYSQL_USER", "root")
     # MYSQL_PASSWORD will be set after class definition
     MYSQL_DB: str = os.getenv("MYSQL_DB", "grade_book")
@@ -22,6 +22,7 @@ class Settings:
     # File Storage
     PROFILE_PHOTOS_DIR: str = "profile_photos"
     ACHIEVEMENTS_DIR: str = "achievements"
+    HOMEWORK_SUBMISSIONS_DIR: str = "homework_submissions"
     
     # API Configuration
     API_V1_STR: str = "/api/v1"
@@ -51,5 +52,7 @@ else:
 os.makedirs(settings.PROFILE_PHOTOS_DIR, exist_ok=True)
 # Create achievements directory if it doesn't exist
 os.makedirs(settings.ACHIEVEMENTS_DIR, exist_ok=True)
+# Create homework submissions directory
+os.makedirs(settings.HOMEWORK_SUBMISSIONS_DIR, exist_ok=True)
 
 

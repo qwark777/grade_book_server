@@ -1,8 +1,32 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time
 from typing import List, Optional
 import aiomysql
 
 from app.db.connection import get_db_connection
+
+
+def _format_time(val) -> str:
+    """Конвертирует TIME из MySQL (time, timedelta или str) в "HH:MM"."""
+    if val is None:
+        return "00:00"
+    if isinstance(val, timedelta):
+        total_sec = int(val.total_seconds())
+        h = total_sec // 3600
+        m = (total_sec % 3600) // 60
+        return f"{h:02d}:{m:02d}"
+    if isinstance(val, time):
+        return val.strftime("%H:%M")
+    s = str(val).strip()
+    if not s or s.isdigit():
+        return "00:00"
+    parts = s.split(":")
+    if len(parts) >= 2:
+        try:
+            h, m = int(parts[0]), int(parts[1])
+            return f"{h:02d}:{m:02d}"
+        except (ValueError, IndexError):
+            pass
+    return s
 from app.models.timetable import (
     DaySchedule, LessonItem, WeekSchedule, TimetableTemplate, 
     TimetableChange, Holiday, AcademicWeek, Room
@@ -117,8 +141,8 @@ async def get_week_schedule(class_id: int, week_start_date: date) -> WeekSchedul
                     
                     day_lessons.append(LessonItem(
                         lesson_number=lesson_number,
-                        start_time=str(template['start_time']),
-                        end_time=str(template['end_time']),
+                        start_time=_format_time(template['start_time']),
+                        end_time=_format_time(template['end_time']),
                         subject=subject_name,
                         teacher=teacher_name,
                         room=room_name or 'Не указано',
@@ -226,11 +250,12 @@ async def get_teacher_week_schedule(teacher_id: int, week_start_date: date) -> W
                 week_type = week_info['week_type']
                 academic_period_id = week_info['academic_period_id']
 
-            # Шаблоны уроков для конкретного учителя с join названий
+            # Шаблоны уроков для конкретного учителя с join названий и class_id, subject_id
             await cursor.execute(
                 """
                 SELECT 
                     t.day_of_week, t.lesson_number, t.start_time, t.end_time,
+                    t.class_id, t.subject_id,
                     c.name AS class_name,
                     s.name AS subject_name,
                     r.name AS room_name
@@ -268,16 +293,23 @@ async def get_teacher_week_schedule(teacher_id: int, week_start_date: date) -> W
                     change = changes.get((current_date, t['lesson_number']))
                     change_type = change['change_type'] if change else None
                     change_reason = change['reason'] if change else None
+                    # Явно берём class_id и subject_id (для экрана действий по уроку у учителя)
+                    raw_class_id = t.get('class_id') or t.get('CLASS_ID')
+                    raw_subject_id = t.get('subject_id') or t.get('SUBJECT_ID')
+                    class_id = int(raw_class_id) if raw_class_id is not None else None
+                    subject_id = int(raw_subject_id) if raw_subject_id is not None else None
                     # В subject кладем НАЗВАНИЕ КЛАССА, а в teacher — НАЗВАНИЕ ПРЕДМЕТА
                     day_lessons.append(LessonItem(
                         lesson_number=t['lesson_number'],
-                        start_time=str(t['start_time']),
-                        end_time=str(t['end_time']),
+                        start_time=_format_time(t['start_time']),
+                        end_time=_format_time(t['end_time']),
                         subject=t.get('class_name') or 'Класс',
                         teacher=t.get('subject_name') or 'Предмет',
                         room=t.get('room_name') or 'Не указано',
                         change_type=change_type,
-                        change_reason=change_reason
+                        change_reason=change_reason,
+                        class_id=class_id,
+                        subject_id=subject_id
                     ))
 
                 days.append(DaySchedule(
@@ -355,5 +387,47 @@ async def create_holiday(
     except Exception as e:
         print(f"Error creating holiday: {e}")
         return False
+    finally:
+        conn.close()
+
+
+async def get_holidays(date_from: Optional[date] = None, date_to: Optional[date] = None) -> List[dict]:
+    """Список праздников (опционально по диапазону дат)."""
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cursor:
+            if date_from and date_to:
+                await cursor.execute(
+                    "SELECT id, date, name, type, affects_classes, description FROM holidays WHERE date BETWEEN %s AND %s ORDER BY date",
+                    (date_from, date_to),
+                )
+            else:
+                await cursor.execute(
+                    "SELECT id, date, name, type, affects_classes, description FROM holidays ORDER BY date DESC LIMIT 200",
+                )
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "date": str(r["date"]),
+                    "name": r["name"],
+                    "type": r["type"],
+                    "affects_classes": bool(r.get("affects_classes", True)),
+                    "description": r.get("description"),
+                }
+                for r in rows
+            ]
+    finally:
+        conn.close()
+
+
+async def delete_holiday(holiday_id: int) -> bool:
+    """Удалить праздник по ID."""
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute("DELETE FROM holidays WHERE id = %s", (holiday_id,))
+            await conn.commit()
+            return cursor.rowcount > 0
     finally:
         conn.close()

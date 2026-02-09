@@ -30,6 +30,7 @@ class UserRole(str, Enum):
 class UserResponse(BaseModel):
     id: int
     full_name: str
+    role: Optional[str] = None
     class_name: Optional[str] = None  # для студентов
     photo_url: Optional[str] = None
     work_place: Optional[str] = None  # для учителей

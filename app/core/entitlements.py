@@ -97,6 +97,62 @@ async def check_entitlement(
         conn.close()
 
 
+# Admin permission keys (what regular admins can do)
+ADMIN_PERMISSIONS = [
+    "edit_school", "edit_classes", "edit_teachers", "edit_students",
+    "edit_subjects", "edit_schedule", "edit_finances", "edit_academic_periods",
+    "edit_holidays", "manage_admins",
+]
+
+
+async def get_admin_info(user: User) -> tuple[Optional[int], bool, list[str]]:
+    """
+    Returns (school_id, is_main_admin, permissions).
+    Owner: (None, True, all). Main admin: (school_id, True, all). Regular: (school_id, False, [...])
+    """
+    if user.role == "owner" or user.role in ("superadmin", "root"):
+        return (None, True, ADMIN_PERMISSIONS.copy())
+
+    if user.role != "admin":
+        return (None, False, [])
+
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                "SELECT school_id, is_main_admin FROM school_admins WHERE admin_user_id = %s",
+                (user.id,)
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return (None, False, [])
+
+            school_id = row.get("school_id") if isinstance(row, dict) else row[0]
+            is_main = bool(row.get("is_main_admin") if isinstance(row, dict) else row[1])
+
+            if is_main:
+                return (school_id, True, ADMIN_PERMISSIONS.copy())
+
+            await cursor.execute(
+                "SELECT permission_key FROM admin_permissions WHERE school_id = %s AND admin_user_id = %s",
+                (school_id, user.id)
+            )
+            perms = [r.get("permission_key") if isinstance(r, dict) else r[0] for r in await cursor.fetchall()]
+            return (school_id, False, perms)
+    finally:
+        conn.close()
+
+
+async def has_admin_permission(user: User, school_id: int, permission_key: str) -> bool:
+    """Check if user (admin) has permission for the given school."""
+    user_school_id, is_main, perms = await get_admin_info(user)
+    if user_school_id is not None and user_school_id != school_id:
+        return False  # Admin is for a different school
+    if is_main:
+        return True
+    return permission_key in perms
+
+
 async def get_school_id_for_user(user: User) -> Optional[int]:
     """Get school_id for the current user based on their role"""
     conn = await get_db_connection()
