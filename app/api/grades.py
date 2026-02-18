@@ -21,10 +21,25 @@ router = APIRouter()
 
 async def check_analytics_access(current_user: User, school_id: int = None, student_id: int = None):
     """Check if user has access to analytics features"""
+    uid = current_user.id if hasattr(current_user, "id") else current_user.get("id")
     # Students can always view their own analytics data
-    if current_user.role == "student" and student_id is not None and current_user.id == student_id:
+    if current_user.role == "student" and student_id is not None and uid == student_id:
         return True
-    
+    # Parents can view their linked children's analytics
+    if current_user.role == "parent" and student_id is not None:
+        conn = await get_db_connection()
+        try:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "SELECT 1 FROM parent_students WHERE parent_id = %s AND student_id = %s",
+                    (uid, student_id),
+                )
+                if await cursor.fetchone():
+                    return True
+        finally:
+            conn.close()
+        raise HTTPException(status_code=403, detail="Not your child")
+
     if current_user.role == "owner":
         return True  # Owner has access to everything
     

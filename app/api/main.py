@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api import auth, profile, grades, users, messages, timetable, schools, subscriptions, entitlements, lessons, ai_advice, risks, lessons_1c_integration, crm_integrations, user_balance, group_chats, admin_analytics, admin_features, admin_extras, owner_analytics, achievements, academic_periods
+from app.api import auth, profile, grades, users, messages, timetable, schools, subscriptions, entitlements, lessons, ai_advice, risks, lessons_1c_integration, crm_integrations, user_balance, group_chats, admin_analytics, admin_features, admin_extras, owner_analytics, achievements, academic_periods, parents
 from typing import List
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -33,6 +33,7 @@ api_router.include_router(ai_advice.router, tags=["ai-advice"])
 api_router.include_router(risks.router, tags=["risks"])
 api_router.include_router(achievements.router, tags=["achievements"])
 api_router.include_router(academic_periods.router, tags=["academic-periods"])
+api_router.include_router(parents.router, prefix="/parents", tags=["parents"])
 
 # Simple achievements listing (static files served from /static)
 @api_router.get("/achievements", tags=["achievements"])

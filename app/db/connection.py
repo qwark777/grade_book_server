@@ -564,6 +564,18 @@ async def init_db():
                 )
             ''')
             
+            # Parent-students binding
+            await cursor.execute('''
+                CREATE TABLE IF NOT EXISTS parent_students (
+                    parent_id INT NOT NULL,
+                    student_id INT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (parent_id, student_id),
+                    FOREIGN KEY (parent_id) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY (student_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            ''')
+
             # Add purchase fields to lesson_enrollments if they don't exist
             try:
                 await cursor.execute('''
