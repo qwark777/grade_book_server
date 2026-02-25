@@ -643,3 +643,104 @@ async def get_financial_transactions(
         raise HTTPException(status_code=500, detail=f"Error getting financial transactions: {str(e)}")
     finally:
         conn.close()
+
+
+class FinancialChartData(BaseModel):
+    """Данные для графика финансов"""
+    labels: List[str]  # Месяцы (Янв, Фев...)
+    values: List[float]  # Суммы
+    currency: str = "RUB"
+
+
+@router.get("/financial-chart", response_model=FinancialChartData)
+async def get_financial_chart_data(current_user: User = Depends(get_current_user)):
+    """Получить данные для графика выручки за последние 12 месяцев"""
+    if current_user.role not in ["admin", "owner", "superadmin"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cursor:
+            school_id = None
+            if current_user.role == "admin":
+                await cursor.execute(
+                    "SELECT school_id FROM school_admins WHERE admin_user_id = %s",
+                    (current_user.id,)
+                )
+                row = await cursor.fetchone()
+                if row:
+                    school_id = row["school_id"] if isinstance(row, dict) else row[0]
+
+            # Генерируем список последних 12 месяцев
+            today = datetime.now()
+            months = []
+            for i in range(11, -1, -1):
+                d = today - timedelta(days=i * 30)  # Приблизительно
+                months.append(d.strftime("%Y-%m"))
+
+            # SQL для группировки по месяцам
+            if school_id:
+                sql = """
+                    SELECT DATE_FORMAT(bt.created_at, '%Y-%m') as month, SUM(bt.amount) as total
+                    FROM balance_transactions bt
+                    JOIN users u ON bt.user_id = u.id
+                    JOIN class_students cs ON u.id = cs.student_id
+                    JOIN classes c ON cs.class_id = c.id
+                    WHERE bt.transaction_type IN ('payment', 'deposit')
+                    AND c.school_id = %s
+                    AND bt.created_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+                    GROUP BY month
+                    ORDER BY month
+                """
+                params = (school_id,)
+            else:
+                sql = """
+                    SELECT DATE_FORMAT(created_at, '%Y-%m') as month, SUM(amount) as total
+                    FROM balance_transactions
+                    WHERE transaction_type IN ('payment', 'deposit')
+                    AND created_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+                    GROUP BY month
+                    ORDER BY month
+                """
+                params = ()
+
+            await cursor.execute(sql, params)
+            rows = await cursor.fetchall()
+            
+            # Создаем словарь {месяц: сумма}
+            data_map = {}
+            for r in rows:
+                m = r["month"] if isinstance(r, dict) else r[0]
+                val = float(r["total"] if isinstance(r, dict) else r[1])
+                data_map[m] = val
+
+            # Формируем итоговые списки, заполняя нулями отсутствующие месяцы
+            chart_labels = []
+            chart_values = []
+            
+            # Mapping для названий месяцев (опционально можно локализовать на клиенте)
+            month_names = {
+                "01": "Янв", "02": "Фев", "03": "Мар", "04": "Апр",
+                "05": "Май", "06": "Июн", "07": "Июл", "08": "Авг",
+                "09": "Сен", "10": "Окт", "11": "Ноя", "12": "Дек"
+            }
+
+            for m_str in months:
+                # m_str like "2023-10"
+                parts = m_str.split("-")
+                month_key = parts[1]
+                label = f"{month_names.get(month_key, month_key)}"
+                
+                chart_labels.append(label)
+                chart_values.append(data_map.get(m_str, 0.0))
+
+            return FinancialChartData(
+                labels=chart_labels,
+                values=chart_values,
+                currency="RUB"
+            )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting financial chart: {str(e)}")
+    finally:
+        conn.close()

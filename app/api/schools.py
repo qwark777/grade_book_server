@@ -40,7 +40,7 @@ async def list_schools(current_user=Depends(get_current_user)):
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT id, name, address, email, phone FROM schools ORDER BY name")
+            await cur.execute("SELECT id, name, address FROM schools ORDER BY name")
             rows = await cur.fetchall()
             return rows
     finally:
@@ -58,7 +58,7 @@ async def get_school(school_id: int, current_user: User = Depends(get_current_us
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT id, name, address, email, phone FROM schools WHERE id = %s", (school_id,))
+            await cur.execute("SELECT id, name, address FROM schools WHERE id = %s", (school_id,))
             row = await cur.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="School not found")
@@ -84,7 +84,7 @@ async def update_school(school_id: int, payload: SchoolUpdate, current_user: Use
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT id, name, address, email, phone FROM schools WHERE id = %s", (school_id,))
+            await cur.execute("SELECT id, name, address FROM schools WHERE id = %s", (school_id,))
             row = await cur.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="School not found")
@@ -98,12 +98,10 @@ async def update_school(school_id: int, payload: SchoolUpdate, current_user: Use
             if payload.address is not None:
                 updates.append("address = %s")
                 params.append(payload.address.strip() or None)
-            if payload.email is not None:
-                updates.append("email = %s")
-                params.append(payload.email.strip() or None)
-            if payload.phone is not None:
-                updates.append("phone = %s")
-                params.append(payload.phone.strip() or None)
+            if payload.address is not None:
+                updates.append("address = %s")
+                params.append(payload.address.strip() or None)
+            # email and phone are not in DB currently
             if not updates:
                 return row
             params.append(school_id)
@@ -124,7 +122,7 @@ async def update_school(school_id: int, payload: SchoolUpdate, current_user: Use
                 await conn.commit()
             except Exception:
                 pass
-            await cur.execute("SELECT id, name, address, email, phone FROM schools WHERE id = %s", (school_id,))
+            await cur.execute("SELECT id, name, address FROM schools WHERE id = %s", (school_id,))
             return await cur.fetchone()
     finally:
         conn.close()
