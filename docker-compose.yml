@@ -48,20 +48,7 @@ services:
       - "${APP_PORT:-8001}:8001"
     networks:
       - gradebook_network
-    command: >
-      sh -c "
-        echo '⏳ Waiting for database to be ready...' &&
-        sleep 20 &&
-        echo '🔧 Initializing database...' &&
-        python -c 'import asyncio; from app.db.connection import init_db; asyncio.run(init_db())' &&
-        echo '✅ Database initialized!' &&
-        echo '' &&
-        echo '👤 Creating owner account...' &&
-        python scripts/auto_create_owner.py &&
-        echo '' &&
-        echo '🚀 Starting server...' &&
-        python main_new.py
-      "
+
 
 volumes:
   mysql_data:

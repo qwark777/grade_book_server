@@ -28,6 +28,10 @@ class Settings:
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Grade Book API"
 
+    # First Superuser
+    FIRST_SUPERUSER: str = os.getenv("FIRST_SUPERUSER") or os.getenv("OWNER_USERNAME", "admin")
+    FIRST_SUPERUSER_PASSWORD: str = os.getenv("FIRST_SUPERUSER_PASSWORD") or os.getenv("OWNER_PASSWORD", "admin")
+
 
 settings = Settings()
 

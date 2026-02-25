@@ -8,6 +8,7 @@ import traceback
 from app.core.security import get_current_user
 from app.db.connection import get_db_connection
 from app.models.user import User
+from app.models.ai_feedback import AiAdviceFeedbackCreate
 
 # Безопасный импорт ML модели
 try:

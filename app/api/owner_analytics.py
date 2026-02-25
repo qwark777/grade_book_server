@@ -5,6 +5,8 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from datetime import datetime, timedelta
+import psutil
+import time
 
 from app.core.security import get_current_user
 from app.db.connection import get_db_connection
@@ -36,6 +38,17 @@ class LicenseInfo(BaseModel):
     used_licenses: int
     total_licenses: Optional[int] = None  # None означает безлимит
     license_usage_percent: Optional[float] = None
+
+
+class ServerStatus(BaseModel):
+    """Статус сервера"""
+    online: bool
+    cpu_usage: float
+    memory_usage: float
+    memory_total: int
+    memory_used: int
+    uptime_seconds: float
+    timestamp: datetime
 
 
 @router.get("/attention-required", response_model=List[SchoolAttentionItem])
@@ -258,3 +271,34 @@ async def get_licenses_info(current_user=Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Error getting licenses info: {str(e)}")
     finally:
         conn.close()
+
+
+@router.get("/server-status", response_model=ServerStatus)
+async def get_server_status(current_user=Depends(get_current_user)):
+    """Получить статус сервера (owner only)"""
+    role = current_user["role"] if isinstance(current_user, dict) else getattr(current_user, "role", None)
+    if role not in ("owner", "superadmin", "root"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        # CPU usage
+        cpu_percent = psutil.cpu_percent(interval=None)
+        
+        # Memory usage
+        memory = psutil.virtual_memory()
+        
+        # Uptime
+        boot_time = psutil.boot_time()
+        uptime = time.time() - boot_time
+        
+        return ServerStatus(
+            online=True,
+            cpu_usage=cpu_percent,
+            memory_usage=memory.percent,
+            memory_total=memory.total,
+            memory_used=memory.used,
+            uptime_seconds=uptime,
+            timestamp=datetime.now()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting server status: {str(e)}")

@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.db.connection import init_db
 from app.api.main import api_router
 from app.websocket.endpoints import websocket_endpoint
+from app.services.startup import create_first_owner
 
 
 @asynccontextmanager
@@ -13,6 +14,8 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Initialize database on startup
     await init_db()
+    # Create first owner if needed
+    await create_first_owner()
     yield
 
 
