@@ -18,14 +18,22 @@ class PointsCalculator:
     }
     
     @staticmethod
-    async def get_subject_coefficient(subject_name: str) -> float:
-        """Получить коэффициент предмета"""
+    async def get_subject_coefficient(
+        subject_name: str,
+        school_id: int,
+    ) -> float:
+        """Получить коэффициент предмета в конкретной школе."""
         conn = await get_db_connection()
         try:
             async with conn.cursor() as cursor:
                 await cursor.execute(
-                    "SELECT coefficient FROM subjects WHERE name = %s",
-                    (subject_name,)
+                    """
+                    SELECT ss.coefficient
+                    FROM school_subjects ss
+                    JOIN subjects s ON s.id = ss.subject_id
+                    WHERE ss.school_id = %s AND s.name = %s
+                    """,
+                    (school_id, subject_name),
                 )
                 result = await cursor.fetchone()
                 return float(result["coefficient"]) if result else 1.0
@@ -33,12 +41,22 @@ class PointsCalculator:
             conn.close()
     
     @staticmethod
-    async def get_all_subject_coefficients() -> Dict[str, float]:
-        """Получить все коэффициенты предметов"""
+    async def get_all_subject_coefficients(
+        school_id: int,
+    ) -> Dict[str, float]:
+        """Получить коэффициенты предметов конкретной школы."""
         conn = await get_db_connection()
         try:
             async with conn.cursor() as cursor:
-                await cursor.execute("SELECT name, coefficient FROM subjects")
+                await cursor.execute(
+                    """
+                    SELECT s.name, ss.coefficient
+                    FROM school_subjects ss
+                    JOIN subjects s ON s.id = ss.subject_id
+                    WHERE ss.school_id = %s
+                    """,
+                    (school_id,),
+                )
                 rows = await cursor.fetchall()
                 return {
                     row["name"]: float(row["coefficient"]) 
@@ -54,7 +72,10 @@ class PointsCalculator:
         return int(base_points * subject_coefficient)
     
     @staticmethod
-    async def calculate_points_for_grades(grades_data: List[Dict]) -> List[Dict]:
+    async def calculate_points_for_grades(
+        grades_data: List[Dict],
+        school_id: int,
+    ) -> List[Dict]:
         """
         Рассчитать баллы для списка оценок
         
@@ -65,7 +86,9 @@ class PointsCalculator:
         - date: str
         """
         # Получаем все коэффициенты предметов
-        subject_coefficients = await PointsCalculator.get_all_subject_coefficients()
+        subject_coefficients = await PointsCalculator.get_all_subject_coefficients(
+            school_id,
+        )
         
         result = []
         for grade_data in grades_data:

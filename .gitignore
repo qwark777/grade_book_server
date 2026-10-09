@@ -1,65 +1,65 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-venv/
-ENV/
-env/
-.venv
-
-# IDE
-.vscode/
+# OS and editor files
+.DS_Store
+Thumbs.db
 .idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
 *.swp
 *.swo
 *~
 
-# Environment variables
+# Local secrets (keep templates)
 .env
-.env.local
-# .env.test - разрешен для коммита (тестовые данные)
-!.env.test
+.env.*
+!.env.example
+!.env.production.example
+*.pem
+*.key
 
 # Logs
 *.log
-server.log
 
-# Database
+# Python environments, caches and packages
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Local database and backups
 *.db
 *.sqlite
+*.sqlite3
+/backups/
 
-# OS
-.DS_Store
-Thumbs.db
+# Runtime uploads and generated ML artifacts
+/profile_photos/*
+!/profile_photos/.gitkeep
+/achievements/*
+!/achievements/.gitkeep
+/homework_submissions/*
+!/homework_submissions/.gitkeep
+/homework_attachments/*
+!/homework_attachments/.gitkeep
+/message_attachments/*
+!/message_attachments/.gitkeep
+/models/*
+!/models/.gitkeep
+/app/models/*.pkl
+/app/models/*.joblib
 
-# Docker
-.dockerignore
-
-# Profile photos and achievements (keep structure but ignore content)
-profile_photos/*
-!profile_photos/.gitkeep
-achievements/*
-!achievements/.gitkeep
-
-# Models
-models/*.pkl
-!models/.gitkeep
+# Keep Dockerfile, .dockerignore, migrations and test fixtures tracked.

@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.db.connection import get_db_connection
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash, validate_password_strength
 
 
 async def create_owner(username: str, password: str, full_name: str = None):
@@ -78,8 +78,8 @@ async def create_owner(username: str, password: str, full_name: str = None):
                 
                 print("\n📝 Теперь вы можете войти в приложение с этими учетными данными:")
                 print(f"   Username: {username}")
-                print(f"   Password: {password}")
-                print("\n⚠️  ВАЖНО: Сохраните эти данные в безопасном месте!")
+                print("   Password: не выводится в целях безопасности")
+                print("\n⚠️  ВАЖНО: Сохраните пароль в безопасном месте!")
                 
                 return True
                 
@@ -101,8 +101,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры использования:
-  python3 scripts/create_owner.py --username owner --password mypassword
-  python3 scripts/create_owner.py --username admin --password secure123 --full-name "Иван Иванов"
+  python3 scripts/create_owner.py --username owner --password 'LongRandomPass123!'
+  python3 scripts/create_owner.py --username owner --password 'LongRandomPass123!' --full-name "Иван Иванов"
         """
     )
     
@@ -131,8 +131,10 @@ def main():
         print("❌ Username должен содержать минимум 3 символа")
         sys.exit(1)
     
-    if len(args.password) < 6:
-        print("❌ Password должен содержать минимум 6 символов")
+    try:
+        validate_password_strength(args.password, args.username)
+    except ValueError as exc:
+        print(f"❌ {exc}")
         sys.exit(1)
     
     # Запускаем создание владельца

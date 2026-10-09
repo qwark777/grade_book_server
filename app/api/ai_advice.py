@@ -6,9 +6,12 @@ from datetime import datetime
 import traceback
 
 from app.core.security import get_current_user
+from app.core.entitlements import get_school_id_for_user, require_school_feature
+from app.core.subscription_limits import consume_school_quota
 from app.db.connection import get_db_connection
 from app.models.user import User
 from app.models.ai_feedback import AiAdviceFeedbackCreate
+from app.api.student_access import ensure_can_access_student
 
 # Безопасный импорт ML модели
 try:
@@ -20,6 +23,24 @@ except ImportError:
         return None
 
 router = APIRouter()
+
+
+async def _consume_ai_quota(current_user: User) -> None:
+    school_id = await get_school_id_for_user(current_user)
+    if school_id is None:
+        return
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cursor:
+            await consume_school_quota(
+                cursor,
+                school_id=school_id,
+                entitlement_key="ai.quota",
+                user_id=current_user.id,
+            )
+            await conn.commit()
+    finally:
+        conn.close()
 
 
 class AiAdviceRequest(BaseModel):
@@ -41,6 +62,7 @@ class AiAdviceResponse(BaseModel):
     icon: str
     date: str
     action_text: Optional[str] = None
+    user_feedback: Optional[bool] = None
 
 
 def _analyze_student_data(
@@ -206,6 +228,23 @@ def _analyze_student_data(
     return advice_list
 
 
+def _apply_feedback_preferences(
+    advice_list: List[AiAdviceResponse],
+    feedback_by_id: dict[str, bool],
+) -> List[AiAdviceResponse]:
+    priority_rank = {"high": 0, "medium": 1, "low": 2}
+
+    for advice in advice_list:
+        advice.user_feedback = feedback_by_id.get(advice.id)
+
+    def sort_key(advice: AiAdviceResponse):
+        feedback = feedback_by_id.get(advice.id)
+        feedback_rank = 0 if feedback is True else (2 if feedback is False else 1)
+        return (feedback_rank, priority_rank.get(advice.priority, 1), advice.title)
+
+    return sorted(advice_list, key=sort_key)
+
+
 @router.post("/ai-advice/analyze", response_model=List[AiAdviceResponse], tags=["ai-advice"])
 async def analyze_student_data(
     request: AiAdviceRequest,
@@ -217,9 +256,9 @@ async def analyze_student_data(
     Принимает данные об оценках, посещаемости и успеваемости,
     анализирует их и возвращает персонализированные советы.
     """
-    # Проверяем, что пользователь запрашивает данные для себя или имеет доступ
-    if current_user.role not in ["owner", "admin", "teacher"] and current_user.id != request.student_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+    await require_school_feature(current_user, "analytics_enabled", detail="Аналитика отключена в настройках школы")
+    await ensure_can_access_student(current_user, request.student_id)
+    await _consume_ai_quota(current_user)
     
     try:
         # Используем общую функцию анализа
@@ -241,9 +280,9 @@ async def get_ai_advice(
     """
     Получает AI-советы для студента, собирая данные из базы.
     """
-    # Проверяем доступ
-    if current_user.role not in ["owner", "admin", "teacher"] and current_user.id != student_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+    await require_school_feature(current_user, "analytics_enabled", detail="Аналитика отключена в настройках школы")
+    await ensure_can_access_student(current_user, student_id)
+    await _consume_ai_quota(current_user)
     
     conn = await get_db_connection()
     try:
@@ -333,11 +372,58 @@ async def get_ai_advice(
                 performance_trends=performance_trends,
                 grade_distribution=None
             )
-            
-            return advice_list
+
+            await cursor.execute(
+                "SELECT advice_id, is_useful FROM ai_advice_feedback WHERE student_id = %s",
+                (student_id,),
+            )
+            feedback_rows = await cursor.fetchall()
+            feedback_by_id = {
+                str(row.get("advice_id")): bool(row.get("is_useful"))
+                for row in feedback_rows
+                if row.get("advice_id") is not None
+            }
+
+            return _apply_feedback_preferences(advice_list, feedback_by_id)
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting AI advice: {str(e)}")
     finally:
         conn.close()
 
+@router.post("/ai-advice/feedback", tags=["ai-advice"])
+async def save_ai_advice_feedback(
+    body: AiAdviceFeedbackCreate,
+    current_user: User = Depends(get_current_user)
+):
+    await require_school_feature(current_user, "analytics_enabled", detail="Аналитика отключена в настройках школы")
+
+    await ensure_can_access_student(current_user, body.student_id)
+
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO ai_advice_feedback (advice_id, student_id, is_useful, comment)
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    is_useful = %s,
+                    comment = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    body.advice_id,
+                    body.student_id,
+                    int(body.is_useful),
+                    body.comment,
+                    int(body.is_useful),
+                    body.comment,
+                ),
+            )
+
+        return {"success": True, "advice_id": body.advice_id, "is_useful": body.is_useful}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving AI advice feedback: {str(e)}")
+    finally:
+        conn.close()

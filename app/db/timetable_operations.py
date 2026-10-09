@@ -33,26 +33,67 @@ from app.models.timetable import (
 )
 
 
-async def get_week_schedule(class_id: int, week_start_date: date) -> WeekSchedule:
+async def get_week_schedule(
+    class_id: int,
+    week_start_date: date,
+    student_id: Optional[int] = None,
+) -> WeekSchedule:
     """Получить расписание на неделю для класса"""
     conn = await get_db_connection()
     try:
         week_end_date = week_start_date + timedelta(days=6)
         
         async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT
+                    c.school_id,
+                    COALESCE(
+                        (
+                            SELECT ap.id
+                            FROM academic_periods ap
+                            WHERE ap.school_id = c.school_id
+                              AND ap.start_date <= %s
+                              AND ap.end_date >= %s
+                            ORDER BY ap.is_active DESC, ap.end_date DESC
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT ap.id
+                            FROM academic_periods ap
+                            WHERE ap.school_id = c.school_id
+                            ORDER BY ap.end_date DESC
+                            LIMIT 1
+                        )
+                    ) AS academic_period_id
+                FROM classes c
+                WHERE c.id = %s
+                LIMIT 1
+                """,
+                (week_end_date, week_start_date, class_id),
+            )
+            class_context = await cursor.fetchone()
+            if not class_context:
+                raise ValueError("Class not found")
+            school_id = class_context["school_id"]
+            academic_period_id = class_context.get("academic_period_id")
+
             # Получаем информацию о неделе
-            await cursor.execute("""
+            await cursor.execute(
+                """
                 SELECT week_number, week_type, academic_period_id
-                FROM academic_weeks 
-                WHERE week_start_date = %s
-            """, (week_start_date,))
+                FROM academic_weeks
+                WHERE week_start_date = %s AND academic_period_id = %s
+                """,
+                (week_start_date, academic_period_id),
+            )
             week_info = await cursor.fetchone()
             
             if not week_info:
                 # Если неделя не найдена, создаем базовую информацию
                 week_number = 1
                 week_type = 'A'
-                academic_period_id = 1
+                academic_period_id = academic_period_id or 0
             else:
                 week_number = week_info['week_number']
                 week_type = week_info['week_type']
@@ -62,8 +103,10 @@ async def get_week_schedule(class_id: int, week_start_date: date) -> WeekSchedul
             await cursor.execute("""
                 SELECT date, name, description
                 FROM holidays 
-                WHERE date BETWEEN %s AND %s AND affects_classes = TRUE
-            """, (week_start_date, week_end_date))
+                WHERE school_id = %s
+                  AND date BETWEEN %s AND %s
+                  AND affects_classes = TRUE
+            """, (school_id, week_start_date, week_end_date))
             holidays = {row['date']: row for row in await cursor.fetchall()}
             
             # Получаем замены на эту неделю
@@ -83,18 +126,49 @@ async def get_week_schedule(class_id: int, week_start_date: date) -> WeekSchedul
             await cursor.execute("""
                 SELECT 
                     t.day_of_week, t.lesson_number, t.start_time, t.end_time,
+                    t.teacher_id, t.subject_id,
                     s.name AS subject_name,
-                    p.full_name AS teacher_name,
+                    TRIM(BOTH '"' FROM p.full_name) AS teacher_name,
                     r.name AS room_name
                 FROM timetable_templates t
                 LEFT JOIN subjects s ON s.id = t.subject_id
                 LEFT JOIN profiles p ON p.user_id = t.teacher_id
                 LEFT JOIN rooms r ON r.id = t.room_id
-                WHERE t.class_id = %s 
+                WHERE t.class_id = %s
+                  AND (%s = 0 OR t.academic_period_id = %s)
                 ORDER BY t.day_of_week, t.lesson_number
-            """, (class_id,))
+            """, (class_id, academic_period_id, academic_period_id))
             templates = await cursor.fetchall()
             
+            paid_sessions_by_date = {}
+            if student_id is not None:
+                await cursor.execute("""
+                    SELECT
+                        s.id,
+                        s.lesson_id,
+                        s.session_date,
+                        s.start_time,
+                        s.end_time,
+                        s.status,
+                        s.lessons_reserved,
+                        e.remaining_lessons,
+                        l.title AS lesson_title,
+                        l.subject AS lesson_subject,
+                        TRIM(BOTH '"' FROM p.full_name) AS tutor_name,
+                        COALESCE(s.location, l.location, '') AS location_name,
+                        COALESCE(s.is_online, l.is_online, FALSE) AS is_online
+                    FROM lesson_student_sessions s
+                    JOIN additional_lessons l ON l.id = s.lesson_id
+                    LEFT JOIN lesson_enrollments e ON e.id = s.enrollment_id
+                    LEFT JOIN profiles p ON p.user_id = s.tutor_id
+                    WHERE s.student_id = %s
+                      AND s.session_date BETWEEN %s AND %s
+                      AND s.status <> 'cancelled'
+                    ORDER BY s.session_date, s.start_time
+                """, (student_id, week_start_date, week_end_date))
+                for row in await cursor.fetchall():
+                    paid_sessions_by_date.setdefault(row['session_date'], []).append(row)
+
             # Строим расписание по дням
             days = []
             day_names = ['', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
@@ -148,7 +222,38 @@ async def get_week_schedule(class_id: int, week_start_date: date) -> WeekSchedul
                         room=room_name or 'Не указано',
                         change_type=change_type,
                         change_reason=change_reason
+                        ,
+                        class_id=class_id,
+                        subject_id=template.get('subject_id'),
+                        teacher_id=template.get('teacher_id'),
                     ))
+
+                for session in paid_sessions_by_date.get(current_date, []):
+                    room_label = 'Онлайн' if session.get('is_online') else (
+                        session.get('location_name') or 'Платное занятие'
+                    )
+                    day_lessons.append(LessonItem(
+                        lesson_number=None,
+                        start_time=_format_time(session['start_time']),
+                        end_time=_format_time(session['end_time']),
+                        subject=session.get('lesson_title') or 'Платное занятие',
+                        teacher=session.get('tutor_name') or 'Преподаватель',
+                        room=room_label,
+                        teacher_id=None,
+                        is_paid_lesson=True,
+                        paid_lesson_id=session.get('lesson_id'),
+                        paid_lesson_session_id=session.get('id'),
+                        paid_lesson_status=session.get('status'),
+                        remaining_lessons=session.get('remaining_lessons'),
+                    ))
+
+                day_lessons.sort(
+                    key=lambda item: (
+                        item.start_time or '99:99',
+                        item.end_time or '99:99',
+                        item.lesson_number if item.lesson_number is not None else 999,
+                    )
+                )
                 
                 days.append(DaySchedule(
                     date=current_date.strftime('%Y-%m-%d'),
@@ -209,17 +314,19 @@ async def _get_room_name(room_id: int) -> str:
         conn.close()
 
 
-async def get_rooms() -> List[Room]:
-    """Получить список всех комнат"""
+async def get_rooms(school_id: int) -> List[Room]:
+    """Получить список активных кабинетов школы."""
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
             await cursor.execute("""
-                SELECT id, name, building, capacity, room_type, is_active
-                FROM rooms 
-                WHERE is_active = TRUE
-                ORDER BY name
-            """)
+                SELECT r.id, r.name, r.building, r.capacity,
+                       r.room_type, r.is_active
+                FROM school_rooms sr
+                JOIN rooms r ON r.id = sr.room_id
+                WHERE sr.school_id = %s AND r.is_active = TRUE
+                ORDER BY r.name
+            """, (school_id,))
             rows = await cursor.fetchall()
             return [Room(**row) for row in rows]
     finally:
@@ -264,33 +371,113 @@ async def get_teacher_week_schedule(teacher_id: int, week_start_date: date) -> W
                 LEFT JOIN subjects s ON s.id = t.subject_id
                 LEFT JOIN rooms r ON r.id = t.room_id
                 WHERE t.teacher_id = %s
+                  AND t.academic_period_id = COALESCE(
+                      (
+                          SELECT ap.id
+                          FROM academic_periods ap
+                          WHERE ap.school_id = c.school_id
+                            AND ap.start_date <= %s
+                            AND ap.end_date >= %s
+                          ORDER BY ap.is_active DESC, ap.end_date DESC
+                          LIMIT 1
+                      ),
+                      (
+                          SELECT ap.id
+                          FROM academic_periods ap
+                          WHERE ap.school_id = c.school_id
+                          ORDER BY ap.end_date DESC
+                          LIMIT 1
+                      )
+                  )
                 ORDER BY t.day_of_week, t.lesson_number
                 """,
-                (teacher_id,)
+                (teacher_id, week_end_date, week_start_date)
             )
             templates = await cursor.fetchall()
 
             # Замены для всех классов, где учитель участвует, за неделю
             await cursor.execute(
                 """
-                SELECT date, lesson_number, change_type, reason
+                    SELECT class_id, date, lesson_number, change_type, reason
                 FROM timetable_changes
                 WHERE date BETWEEN %s AND %s AND (new_teacher_id = %s OR original_teacher_id = %s)
                 """,
                 (week_start_date, week_end_date, teacher_id, teacher_id)
             )
-            changes = {(row['date'], row['lesson_number']): row for row in await cursor.fetchall()}
+            changes = {
+                (row['class_id'], row['date'], row['lesson_number']): row
+                for row in await cursor.fetchall()
+            }
+
+            await cursor.execute(
+                """
+                SELECT h.date, h.name, h.description
+                FROM holidays h
+                JOIN school_users su
+                  ON su.school_id = h.school_id AND su.user_id = %s
+                WHERE h.date BETWEEN %s AND %s
+                  AND h.affects_classes = TRUE
+                """,
+                (teacher_id, week_start_date, week_end_date),
+            )
+            holidays = {
+                row["date"]: row for row in await cursor.fetchall()
+            }
+
+            await cursor.execute(
+                """
+                SELECT
+                    s.id,
+                    s.lesson_id,
+                    s.student_id,
+                    s.session_date,
+                    s.start_time,
+                    s.end_time,
+                    s.status,
+                    s.lessons_reserved,
+                    e.remaining_lessons,
+                    l.title AS lesson_title,
+                    TRIM(BOTH '"' FROM st.full_name) AS student_name,
+                    COALESCE(s.location, l.location, '') AS location_name,
+                    COALESCE(s.is_online, l.is_online, FALSE) AS is_online
+                FROM lesson_student_sessions s
+                JOIN additional_lessons l ON l.id = s.lesson_id
+                LEFT JOIN lesson_enrollments e ON e.id = s.enrollment_id
+                LEFT JOIN profiles st ON st.user_id = s.student_id
+                WHERE s.tutor_id = %s
+                  AND s.session_date BETWEEN %s AND %s
+                  AND s.status <> 'cancelled'
+                ORDER BY s.session_date, s.start_time
+                """,
+                (teacher_id, week_start_date, week_end_date)
+            )
+            paid_sessions_by_date = {}
+            for row in await cursor.fetchall():
+                paid_sessions_by_date.setdefault(row['session_date'], []).append(row)
 
             days = []
             day_names = ['', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
             for day_offset in range(7):
                 current_date = week_start_date + timedelta(days=day_offset)
                 day_of_week = current_date.weekday() + 1
+                holiday_info = holidays.get(current_date)
+                if holiday_info:
+                    days.append(DaySchedule(
+                        date=current_date.strftime('%Y-%m-%d'),
+                        day_of_week=day_names[day_of_week],
+                        is_holiday=True,
+                        holiday_name=holiday_info['name'],
+                        holiday_reason=holiday_info.get('description'),
+                        lessons=[],
+                    ))
+                    continue
                 day_templates = [t for t in templates if t['day_of_week'] == day_of_week]
 
                 day_lessons = []
                 for t in day_templates:
-                    change = changes.get((current_date, t['lesson_number']))
+                    change = changes.get(
+                        (t['class_id'], current_date, t['lesson_number'])
+                    )
                     change_type = change['change_type'] if change else None
                     change_reason = change['reason'] if change else None
                     # Явно берём class_id и subject_id (для экрана действий по уроку у учителя)
@@ -309,8 +496,36 @@ async def get_teacher_week_schedule(teacher_id: int, week_start_date: date) -> W
                         change_type=change_type,
                         change_reason=change_reason,
                         class_id=class_id,
-                        subject_id=subject_id
+                        subject_id=subject_id,
+                        teacher_id=teacher_id,
                     ))
+
+                for session in paid_sessions_by_date.get(current_date, []):
+                    room_label = 'Онлайн' if session.get('is_online') else (
+                        session.get('location_name') or 'Платное занятие'
+                    )
+                    day_lessons.append(LessonItem(
+                        lesson_number=None,
+                        start_time=_format_time(session['start_time']),
+                        end_time=_format_time(session['end_time']),
+                        subject=session.get('student_name') or 'Ученик',
+                        teacher=session.get('lesson_title') or 'Платное занятие',
+                        room=room_label,
+                        teacher_id=teacher_id,
+                        is_paid_lesson=True,
+                        paid_lesson_id=session.get('lesson_id'),
+                        paid_lesson_session_id=session.get('id'),
+                        paid_lesson_status=session.get('status'),
+                        remaining_lessons=session.get('remaining_lessons'),
+                    ))
+
+                day_lessons.sort(
+                    key=lambda item: (
+                        item.start_time or '99:99',
+                        item.end_time or '99:99',
+                        item.lesson_number if item.lesson_number is not None else 999,
+                    )
+                )
 
                 days.append(DaySchedule(
                     date=current_date.strftime('%Y-%m-%d'),
@@ -368,6 +583,7 @@ async def create_timetable_change(
 
 
 async def create_holiday(
+    school_id: int,
     date: date,
     name: str,
     holiday_type: str = 'holiday',
@@ -379,9 +595,17 @@ async def create_holiday(
     try:
         async with conn.cursor() as cursor:
             await cursor.execute("""
-                INSERT INTO holidays (date, name, type, affects_classes, description)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (date, name, holiday_type, affects_classes, description))
+                INSERT INTO holidays
+                    (school_id, date, name, type, affects_classes, description)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                school_id,
+                date,
+                name,
+                holiday_type,
+                affects_classes,
+                description,
+            ))
             await conn.commit()
             return True
     except Exception as e:
@@ -391,19 +615,34 @@ async def create_holiday(
         conn.close()
 
 
-async def get_holidays(date_from: Optional[date] = None, date_to: Optional[date] = None) -> List[dict]:
+async def get_holidays(
+    school_id: int,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+) -> List[dict]:
     """Список праздников (опционально по диапазону дат)."""
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
             if date_from and date_to:
                 await cursor.execute(
-                    "SELECT id, date, name, type, affects_classes, description FROM holidays WHERE date BETWEEN %s AND %s ORDER BY date",
-                    (date_from, date_to),
+                    """
+                    SELECT id, date, name, type, affects_classes, description
+                    FROM holidays
+                    WHERE school_id = %s AND date BETWEEN %s AND %s
+                    ORDER BY date
+                    """,
+                    (school_id, date_from, date_to),
                 )
             else:
                 await cursor.execute(
-                    "SELECT id, date, name, type, affects_classes, description FROM holidays ORDER BY date DESC LIMIT 200",
+                    """
+                    SELECT id, date, name, type, affects_classes, description
+                    FROM holidays
+                    WHERE school_id = %s
+                    ORDER BY date DESC LIMIT 200
+                    """,
+                    (school_id,),
                 )
             rows = await cursor.fetchall()
             return [
@@ -421,12 +660,15 @@ async def get_holidays(date_from: Optional[date] = None, date_to: Optional[date]
         conn.close()
 
 
-async def delete_holiday(holiday_id: int) -> bool:
+async def delete_holiday(holiday_id: int, school_id: int) -> bool:
     """Удалить праздник по ID."""
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
-            await cursor.execute("DELETE FROM holidays WHERE id = %s", (holiday_id,))
+            await cursor.execute(
+                "DELETE FROM holidays WHERE id = %s AND school_id = %s",
+                (holiday_id, school_id),
+            )
             await conn.commit()
             return cursor.rowcount > 0
     finally:

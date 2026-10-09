@@ -1,134 +1,82 @@
-# Grade Book Server
+# GradeBook — сервер
 
-Серверная часть системы электронного журнала с мобильным приложением.
+Сервер электронного дневника на Python/FastAPI. Предоставляет REST API и WebSocket для Flutter-приложения, хранит данные в MySQL и использует Redis для обмена событиями между процессами. Поддерживает пользователей и школы, расписание, оценки, домашние задания, сообщения, достижения, подписки, интеграции CRM и заявки с сайта.
 
-## Структура проекта
+## Связанные проекты
 
-```
-grade_book_server/
-├── app/
-│   ├── api/                    # API роуты
-│   │   ├── auth.py            # Аутентификация
-│   │   ├── profile.py         # Профили пользователей
-│   │   ├── grades.py          # Оценки и классы
-│   │   ├── users.py           # Управление пользователями
-│   │   ├── messages.py        # Сообщения
-│   │   └── main.py            # Главный роутер API
-│   ├── core/                  # Основные компоненты
-│   │   ├── config.py          # Конфигурация
-│   │   └── security.py        # Безопасность и JWT
-│   ├── db/                    # База данных
-│   │   ├── connection.py      # Подключение к БД
-│   │   └── user_operations.py # Операции с пользователями
-│   ├── models/                # Модели данных
-│   │   ├── user.py           # Модели пользователей
-│   │   ├── grade.py          # Модели оценок
-│   │   └── message.py        # Модели сообщений
-│   ├── websocket/             # WebSocket
-│   │   ├── manager.py        # Менеджер подключений
-│   │   └── endpoints.py      # WebSocket эндпоинты
-│   └── main.py               # Главное приложение
-├── main_new.py               # Новая точка входа
-├── requirements.txt          # Зависимости
-└── README.md                # Документация
-```
+- `../app` — приложение Flutter/Dart.
+- `../landing` — статический сайт, отправляющий заявки в `/api/v1/landing/leads`.
 
-## Установка и запуск
+## Запуск через Docker
 
-### 🐳 Вариант 1: Docker (Рекомендуется для быстрого развертывания)
-
-**Развертывание одной командой:**
+Нужны Docker и Docker Compose. Команды выполняются из этой папки:
 
 ```bash
-# 1. Настройте переменные окружения
 cp .env.example .env
-# Отредактируйте .env и измените пароли и ключи!
-
-# 2. Запустите сервер
-docker-compose up -d
-
-# 3. Создайте первого владельца
-docker-compose exec app python scripts/create_owner.py \
-  --username owner --password YourSecurePassword123
 ```
 
-Подробная инструкция: [DOCKER_SETUP.md](DOCKER_SETUP.md)
+Заполните `.env`: `MYSQL_ROOT_PASSWORD`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DB`, `SECRET_KEY`, `ENCRYPTION_KEY`, `OWNER_USERNAME`, `OWNER_PASSWORD`, а также разрешённые адреса сайта в `BACKEND_CORS_ORIGINS` и API-хосты в `TRUSTED_HOSTS`.
 
-### 📦 Вариант 2: Локальная установка
+Генерация ключей:
 
-1. Установите зависимости:
 ```bash
+python3 -c 'import secrets; print(secrets.token_hex(32))'
+# Следующая команда требует установленного cryptography:
+python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+```
+
+```bash
+docker compose up -d --build
+curl -fsS http://127.0.0.1:8001/api/v1/health
+docker compose logs --tail=100 app
+```
+
+Обычный compose запускает MySQL, Redis и API; API по умолчанию доступен на порту 8001. Для публичного сервера используйте `docker-compose.prod.yml` и [руководство эксплуатации](docs/PRODUCTION_RUNBOOK.md), включая миграции и резервные копии.
+
+## Локальный запуск
+
+Dockerfile использует Python 3.11; `.python-version` указывает 3.12 для локального окружения. Установите зависимости в отдельное виртуальное окружение, подготовьте MySQL и настройте `.env` для локальных адресов сервисов:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
+# Заполните .env; MYSQL_HOST должен указывать на вашу MySQL.
+python -m alembic upgrade head
+python -m app.main
 ```
 
-2. Настройте базу данных MySQL:
-   - Создайте базу данных `grade_book`
-   - Обновите настройки в `app/core/config.py`
+Настройки загружаются из `.env`; переменные процесса имеют приоритет. Проверка конфигурации: `python scripts/doctor.py`. Создание владельца вручную: `python scripts/create_owner.py --help`.
 
-3. **Создайте первого владельца (owner):**
-   При первом запуске необходимо создать учетную запись владельца:
-   ```bash
-   python scripts/create_owner.py --username owner --password your_secure_password
-   ```
-   
-   Или с указанием полного имени:
-   ```bash
-   python scripts/create_owner.py --username owner --password your_secure_password --full-name "Имя Фамилия"
-   ```
-   
-   ⚠️ **ВАЖНО:** Сохраните учетные данные в безопасном месте! Владелец имеет полный доступ ко всем функциям системы.
+## Структура
 
-4. Запустите сервер:
+- `app/api`, `app/models`, `app/core` — маршруты, модели и настройки.
+- `app/db`, `app/websocket` — работа с базой и событиями.
+- `migrations`, `alembic.ini` — миграции схемы.
+- `scripts`, `Makefile` — обслуживание, проверки и резервные копии.
+- `deploy`, `docker-compose.prod.yml` — конфигурация production.
+- `test_*.py`, `test_fixtures` — тесты и фикстуры.
+- `docs` — руководства по эксплуатации и предметным подсистемам.
+
+Файлы пользователей находятся в `profile_photos`, `homework_submissions`, `homework_attachments`, `message_attachments`; каталог `achievements` содержит серверные изображения наград. В Docker они сохраняются в отдельных volumes. Содержимое этих каталогов, резервные копии и обученные модели не включаются в Git или Docker-образ.
+
+## Проверки
+
 ```bash
-python main_new.py
+make doctor
+make test
 ```
 
-Или используйте uvicorn напрямую:
-```bash
-uvicorn app.main:app --host localhost --port 8001 --reload
-```
+Для полной проверки перед выпуском: `bash scripts/predeploy_check.sh`. Дополнительные тесты могут требовать настроенной тестовой базы; не запускайте скрипты заполнения демо-данных на рабочей базе.
 
-5. Войдите в приложение используя созданные учетные данные владельца.
+## Документация
 
-📖 Подробная инструкция по первому запуску: [FIRST_START.md](FIRST_START.md)
+- [Production и резервные копии](docs/PRODUCTION_RUNBOOK.md).
+- [CRM](docs/CRM_INTEGRATION_GUIDE.md) и [1С](docs/INTEGRATION_1C_GUIDE.md).
+- [Подписки](docs/SUBSCRIPTION_SYSTEM.md).
+- [Коэффициенты предметов](docs/SUBJECT_COEFFICIENTS.md).
+- [ML-модель](docs/ML_SETUP.md).
+- [Управление достижениями](scripts/ACHIEVEMENTS_README.md).
 
-## API Endpoints
-
-### Аутентификация
-- `POST /api/v1/register` - Регистрация пользователя
-- `POST /api/v1/token` - Получение токена
-- `GET /api/v1/verify-token` - Проверка токена
-
-### Профили
-- `GET /api/v1/profile/info` - Получение информации профиля
-- `POST /api/v1/profile/full-update` - Обновление профиля
-- `POST /api/v1/profile/photo` - Загрузка фото
-- `GET /api/v1/profile_photo/{user_id}` - Получение фото
-
-### Пользователи
-- `GET /api/v1/users/all` - Список всех пользователей
-- `GET /api/v1/users/{user_id}` - Информация о пользователе
-
-### Оценки и классы
-- `GET /api/v1/classes` - Список классов
-- `GET /api/v1/subject-scores/{subject_name}` - Оценки по предмету
-- `GET /api/v1/student-scores-full` - Все оценки студентов
-
-### Сообщения
-- `POST /api/v1/messages/send` - Отправка сообщения
-- `GET /api/v1/messages/{user_id}` - Получение сообщений
-- `GET /api/v1/conversations` - Список бесед
-
-### WebSocket
-- `WS /ws?token={jwt_token}` - WebSocket подключение для чата
-
-## Особенности
-
-- JWT аутентификация
-- Шифрование сообщений
-- WebSocket для реального времени
-- Поддержка ролей (студент/учитель)
-- Загрузка и хранение фотографий профилей
-- MySQL база данных
-
-
+Предметные руководства содержат исторические примеры: точные маршруты и схемы сверяйте с `app/api` и моделями. `.env` и приватные ключи остаются локальными; в Git хранятся только `.env.example` и `.env.production.example`. `.gitignore` не удаляет файлы, ранее добавленные в индекс.

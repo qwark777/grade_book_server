@@ -9,21 +9,31 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db.connection import get_db_connection
+from app.services.achievement_service import ACHIEVEMENT_CATALOG
 
 
-async def add_achievement_to_catalog(code: str, title: str, description: str = None, image_url: str = None):
+async def add_achievement_to_catalog(
+    code: str,
+    title: str,
+    description: str = None,
+    image_url: str = None,
+    rarity: str = None,
+):
     """Добавить достижение в каталог"""
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
             await cursor.execute("""
-                INSERT INTO achievements (code, title, description, image_url)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO achievements
+                    (code, title, description, image_url, rarity)
+                VALUES (%s, %s, %s, %s, %s)
+                AS incoming
                 ON DUPLICATE KEY UPDATE 
-                    title = VALUES(title),
-                    description = COALESCE(VALUES(description), description),
-                    image_url = COALESCE(VALUES(image_url), image_url)
-            """, (code, title, description, image_url))
+                    title = incoming.title,
+                    description = COALESCE(incoming.description, description),
+                    image_url = COALESCE(incoming.image_url, image_url),
+                    rarity = COALESCE(incoming.rarity, rarity)
+            """, (code, title, description, image_url, rarity))
             await conn.commit()
             print(f"✓ Добавлено достижение: {title} (code: {code})")
     finally:
@@ -100,51 +110,13 @@ async def revoke_achievement_from_user(user_id: int, achievement_code: str = Non
 
 async def seed_default_achievements():
     """Добавить стандартные достижения в каталог"""
-    achievements = [
-        {
-            'code': 'first_grade',
-            'title': 'Первая оценка',
-            'description': 'Получена первая оценка в системе',
-            'image_url': '/static/achievements/first_grade.png'
-        },
-        {
-            'code': 'excellent_student',
-            'title': 'Отличник',
-            'description': 'Все оценки за период - отлично',
-            'image_url': '/static/achievements/excellent_student.png'
-        },
-        {
-            'code': 'perfect_attendance',
-            'title': 'Идеальная посещаемость',
-            'description': '100% посещаемость за месяц',
-            'image_url': '/static/achievements/perfect_attendance.png'
-        },
-        {
-            'code': 'homework_master',
-            'title': 'Мастер домашних заданий',
-            'description': 'Выполнено 50 домашних заданий',
-            'image_url': '/static/achievements/homework_master.png'
-        },
-        {
-            'code': 'week_warrior',
-            'title': 'Воин недели',
-            'description': 'Активность всю неделю подряд',
-            'image_url': '/static/achievements/week_warrior.png'
-        },
-        {
-            'code': 'social_butterfly',
-            'title': 'Социальная бабочка',
-            'description': 'Отправлено 100 сообщений',
-            'image_url': '/static/achievements/social_butterfly.png'
-        },
-    ]
-    
-    for ach in achievements:
+    for ach in ACHIEVEMENT_CATALOG:
         await add_achievement_to_catalog(
-            ach['code'],
-            ach['title'],
-            ach['description'],
-            ach['image_url']
+            ach["code"],
+            ach["title"],
+            ach["description"],
+            ach["image_url"],
+            ach["rarity"],
         )
 
 
@@ -179,7 +151,7 @@ async def main():
             args.code,
             args.title,
             args.description,
-            args.image_url
+            args.image_url,
         )
     
     elif args.action == 'award':

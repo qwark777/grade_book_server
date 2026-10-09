@@ -1,4 +1,5 @@
 from enum import Enum
+from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel
 
@@ -32,6 +33,7 @@ class UserResponse(BaseModel):
     full_name: str
     role: Optional[str] = None
     class_name: Optional[str] = None  # для студентов
+    school_name: Optional[str] = None
     photo_url: Optional[str] = None
     work_place: Optional[str] = None  # для учителей
     location: Optional[str] = None
@@ -39,6 +41,8 @@ class UserResponse(BaseModel):
     classes: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
+    is_online: bool = False
+    last_seen_at: Optional[datetime] = None
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -46,5 +50,3 @@ class ProfileUpdateRequest(BaseModel):
     work_place: str
     location: str
     bio: str
-
-

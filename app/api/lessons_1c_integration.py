@@ -6,13 +6,30 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import List, Optional
 from datetime import datetime, date
 from app.core.security import get_current_user
+from app.core.entitlements import get_school_id_for_user
 from app.models.user import UserInDB
 from app.db.connection import get_db_connection
 from pydantic import BaseModel
 import json
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
 
 router = APIRouter()
+
+OWNER_ROLES = {"owner", "superadmin", "root"}
+
+
+async def _resolve_export_school_id(requested_school_id: Optional[int], current_user: UserInDB) -> Optional[int]:
+    if current_user.role in OWNER_ROLES:
+        return requested_school_id
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    admin_school_id = await get_school_id_for_user(current_user)
+    if admin_school_id is None:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if requested_school_id is not None and int(requested_school_id) != int(admin_school_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return int(admin_school_id)
 
 
 class Lesson1CExport(BaseModel):
@@ -45,7 +62,8 @@ class Enrollment1CExport(BaseModel):
     payment_status: Optional[str] = None
 
 
-@router.get("/lessons/export/1c/json")
+@router.get("/lessons/export/1c/json", include_in_schema=False)
+@router.get("/export/1c/json")
 async def export_lessons_to_1c_json(
     date_from: Optional[str] = Query(None, description="Дата начала периода (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="Дата окончания периода (YYYY-MM-DD)"),
@@ -55,9 +73,7 @@ async def export_lessons_to_1c_json(
     """
     Экспорт дополнительных занятий в JSON формате для 1С
     """
-    # Проверка прав доступа (только админы)
-    if current_user.role not in ["admin", "owner", "superadmin"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    school_id = await _resolve_export_school_id(school_id, current_user)
     
     conn = await get_db_connection()
     try:
@@ -67,7 +83,7 @@ async def export_lessons_to_1c_json(
                     l.id,
                     l.title,
                     l.subject,
-                    p.full_name as tutor_name,
+                    TRIM(BOTH '"' FROM p.full_name) as tutor_name,
                     l.tutor_id,
                     l.price,
                     l.duration_minutes,
@@ -128,7 +144,8 @@ async def export_lessons_to_1c_json(
         conn.close()
 
 
-@router.get("/lessons/export/1c/xml")
+@router.get("/lessons/export/1c/xml", include_in_schema=False)
+@router.get("/export/1c/xml")
 async def export_lessons_to_1c_xml(
     date_from: Optional[str] = Query(None, description="Дата начала периода (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="Дата окончания периода (YYYY-MM-DD)"),
@@ -138,9 +155,7 @@ async def export_lessons_to_1c_xml(
     """
     Экспорт дополнительных занятий в XML формате для 1С
     """
-    # Проверка прав доступа
-    if current_user.role not in ["admin", "owner", "superadmin"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    school_id = await _resolve_export_school_id(school_id, current_user)
     
     conn = await get_db_connection()
     try:
@@ -150,7 +165,7 @@ async def export_lessons_to_1c_xml(
                     l.id,
                     l.title,
                     l.subject,
-                    p.full_name as tutor_name,
+                    TRIM(BOTH '"' FROM p.full_name) as tutor_name,
                     l.tutor_id,
                     l.price,
                     l.duration_minutes,
@@ -218,7 +233,8 @@ async def export_lessons_to_1c_xml(
         conn.close()
 
 
-@router.get("/lessons/enrollments/export/1c/json")
+@router.get("/lessons/enrollments/export/1c/json", include_in_schema=False)
+@router.get("/enrollments/export/1c/json")
 async def export_enrollments_to_1c_json(
     date_from: Optional[str] = Query(None, description="Дата начала периода (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="Дата окончания периода (YYYY-MM-DD)"),
@@ -230,8 +246,7 @@ async def export_enrollments_to_1c_json(
     Экспорт записей на занятия в JSON формате для 1С
     Включает информацию о студентах и платежах
     """
-    if current_user.role not in ["admin", "owner", "superadmin"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    school_id = await _resolve_export_school_id(school_id, current_user)
     
     conn = await get_db_connection()
     try:
@@ -243,7 +258,7 @@ async def export_enrollments_to_1c_json(
                     l.title as lesson_title,
                     l.price,
                     e.student_id,
-                    p.full_name as student_name,
+                    TRIM(BOTH '"' FROM p.full_name) as student_name,
                     e.enrolled_at as enrollment_date,
                     e.status,
                     e.payment_status
@@ -298,7 +313,8 @@ async def export_enrollments_to_1c_json(
         conn.close()
 
 
-@router.get("/lessons/financial/export/1c/json")
+@router.get("/lessons/financial/export/1c/json", include_in_schema=False)
+@router.get("/financial/export/1c/json")
 async def export_financial_data_to_1c(
     date_from: Optional[str] = Query(None, description="Дата начала периода (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="Дата окончания периода (YYYY-MM-DD)"),
@@ -309,8 +325,7 @@ async def export_financial_data_to_1c(
     Экспорт финансовых данных по дополнительным занятиям для 1С
     Суммирует доходы, количество записей, статистику по занятиям
     """
-    if current_user.role not in ["admin", "owner", "superadmin"]:
-        raise HTTPException(status_code=403, detail="Access denied")
+    school_id = await _resolve_export_school_id(school_id, current_user)
     
     conn = await get_db_connection()
     try:

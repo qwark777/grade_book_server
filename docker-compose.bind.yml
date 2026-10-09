@@ -6,16 +6,16 @@ services:
     container_name: gradebook_mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       MYSQL_DATABASE: ${MYSQL_DB:-grade_book}
       MYSQL_USER: ${MYSQL_USER:-gradebook_user}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-gradebook_password}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
     volumes:
       - mysql_data:/var/lib/mysql
     ports:
       - "${MYSQL_PORT:-3306}:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -32,11 +32,12 @@ services:
     environment:
       MYSQL_HOST: ${MYSQL_HOST:-db}
       MYSQL_USER: ${MYSQL_USER:-gradebook_user}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-gradebook_password}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       MYSQL_DB: ${MYSQL_DB:-grade_book}
       MYSQL_PORT: 3306
-      SECRET_KEY: ${SECRET_KEY:-304f1388f317fe2e917a1df468144def7f60586ba96dc80b07d26c68cae00fab}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-ICkoftk-wbOx89vzo2nuGkPatHZCQ1IKBVpFdRJ1F4k=}
+      APP_HOST: 0.0.0.0
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
       OWNER_USERNAME: ${OWNER_USERNAME:-owner}
       OWNER_PASSWORD: ${OWNER_PASSWORD:-}
       OWNER_FULL_NAME: ${OWNER_FULL_NAME:-}

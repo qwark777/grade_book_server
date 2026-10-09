@@ -6,19 +6,41 @@ services:
     container_name: gradebook_mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       MYSQL_DATABASE: ${MYSQL_DB:-grade_book}
-      MYSQL_USER: ${MYSQL_USER:-root}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-12345678}
+      MYSQL_USER: ${MYSQL_USER:-gradebook_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
     volumes:
       - mysql_data:/var/lib/mysql
     ports:
       - "${MYSQL_PORT:-3306}:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - gradebook_network
+
+  realtime:
+    image: redis:7.4-alpine
+    container_name: gradebook_realtime
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     networks:
       - gradebook_network
 
@@ -29,23 +51,40 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      realtime:
+        condition: service_healthy
     environment:
       MYSQL_HOST: ${MYSQL_HOST:-db}
-      MYSQL_USER: ${MYSQL_USER:-root}
-      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_USER: ${MYSQL_USER:-gradebook_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
       MYSQL_DB: ${MYSQL_DB:-grade_book}
       MYSQL_PORT: 3306
-      SECRET_KEY: ${SECRET_KEY:-304f1388f317fe2e917a1df468144def7f60586ba96dc80b07d26c68cae00fab}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-ICkoftk-wbOx89vzo2nuGkPatHZCQ1IKBVpFdRJ1F4k=}
+      APP_HOST: 0.0.0.0
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
       OWNER_USERNAME: ${OWNER_USERNAME:-owner}
-      OWNER_PASSWORD: ${OWNER_PASSWORD:-test_password_123}
+      OWNER_PASSWORD: ${OWNER_PASSWORD:?OWNER_PASSWORD is required}
       OWNER_FULL_NAME: ${OWNER_FULL_NAME:-Test Owner}
+      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-}
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-*}
+      REALTIME_REDIS_URL: ${REALTIME_REDIS_URL:-redis://realtime:6379/0}
+      REALTIME_REDIS_CHANNEL: ${REALTIME_REDIS_CHANNEL:-gradebook:realtime}
+      REALTIME_PRESENCE_TTL_SECONDS: ${REALTIME_PRESENCE_TTL_SECONDS:-90}
+      REALTIME_BROKER_REQUIRED: ${REALTIME_BROKER_REQUIRED:-true}
     volumes:
       - profile_photos_data:/app/profile_photos
       - achievements_data:/app/achievements
       - homework_submissions_data:/app/homework_submissions
+      - homework_attachments_data:/app/homework_attachments
+      - message_attachments_data:/app/message_attachments
     ports:
       - "${APP_PORT:-8001}:8001"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/health', timeout=3).read()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     networks:
       - gradebook_network
 
@@ -55,6 +94,8 @@ volumes:
   profile_photos_data:
   achievements_data:
   homework_submissions_data:
+  homework_attachments_data:
+  message_attachments_data:
 
 networks:
   gradebook_network:

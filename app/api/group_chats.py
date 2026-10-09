@@ -6,8 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from typing import List, Optional
 from datetime import datetime
 from app.db.connection import get_db_connection
-from app.core.security import get_current_user
+from app.core.security import decrypt_message, get_current_user
 from app.core.config import settings
+from app.core.entitlements import get_school_id_for_user, require_school_feature
+from app.core.file_uploads import IMAGE_EXTS, MAX_IMAGE_BYTES, save_upload_limited, validate_upload_metadata
 from app.models.user import UserInDB
 from app.models.group_chat import (
     GroupChatCreate, GroupChatUpdate, GroupChat, GroupChatDetail,
@@ -15,6 +17,66 @@ from app.models.group_chat import (
 )
 
 router = APIRouter(prefix="/group-chats")
+APPLICATION_OWNER_ROLES = {"owner", "superadmin", "root"}
+
+
+async def _ensure_group_members_allowed(
+    cursor,
+    current_user: UserInDB,
+    user_ids: List[int],
+) -> List[int]:
+    unique_ids = list(dict.fromkeys(int(user_id) for user_id in user_ids))
+    if not unique_ids:
+        return []
+    if current_user.role in APPLICATION_OWNER_ROLES:
+        await cursor.execute(
+            "SELECT id FROM users WHERE id IN ({})".format(
+                ",".join(["%s"] * len(unique_ids))
+            ),
+            tuple(unique_ids),
+        )
+    else:
+        school_id = await get_school_id_for_user(current_user)
+        if school_id is None:
+            raise HTTPException(status_code=403, detail="No school access")
+        await cursor.execute(
+            """
+            SELECT DISTINCT u.id
+            FROM users u
+            LEFT JOIN school_users su ON su.user_id = u.id
+            LEFT JOIN school_admins sa ON sa.admin_user_id = u.id
+            LEFT JOIN class_students cs ON cs.student_id = u.id
+            LEFT JOIN classes student_class ON student_class.id = cs.class_id
+            LEFT JOIN class_teachers ct ON ct.teacher_id = u.id
+            LEFT JOIN classes teacher_class ON teacher_class.id = ct.class_id
+            LEFT JOIN class_subject_teachers cst ON cst.teacher_id = u.id
+            LEFT JOIN classes subject_teacher_class ON subject_teacher_class.id = cst.class_id
+            LEFT JOIN parent_students ps ON ps.parent_id = u.id
+            LEFT JOIN class_students child_cs ON child_cs.student_id = ps.student_id
+            LEFT JOIN classes parent_class ON parent_class.id = child_cs.class_id
+            WHERE u.id IN ({})
+              AND (
+                  u.role IN ('owner', 'superadmin', 'root')
+                  OR su.school_id = %s
+                  OR sa.school_id = %s
+                  OR student_class.school_id = %s
+                  OR teacher_class.school_id = %s
+                  OR subject_teacher_class.school_id = %s
+                  OR parent_class.school_id = %s
+              )
+            """.format(",".join(["%s"] * len(unique_ids))),
+            tuple(unique_ids) + (school_id,) * 6,
+        )
+    allowed_ids = {
+        int(row["id"]) for row in await cursor.fetchall()
+    }
+    missing_ids = set(unique_ids) - allowed_ids
+    if missing_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="Нельзя добавить пользователя другой школы",
+        )
+    return unique_ids
 
 
 @router.post("", response_model=GroupChatDetail)
@@ -23,6 +85,11 @@ async def create_group_chat(
     current_user: UserInDB = Depends(get_current_user)
 ):
     """Создать новый групповой чат"""
+    await require_school_feature(
+        current_user,
+        "messages_enabled",
+        detail="Сообщения отключены в настройках школы",
+    )
     if not data.name or not data.name.strip():
         raise HTTPException(status_code=400, detail="Group name is required")
     
@@ -32,18 +99,17 @@ async def create_group_chat(
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
+            member_ids_with_creator = await _ensure_group_members_allowed(
+                cursor,
+                current_user,
+                [current_user.id, *data.member_ids],
+            )
             # Создаем группу
             await cursor.execute("""
                 INSERT INTO group_chats (name, description, created_by)
                 VALUES (%s, %s, %s)
             """, (data.name.strip(), data.description, current_user.id))
-            await conn.commit()
             group_id = cursor.lastrowid
-            
-            # Добавляем создателя как админа
-            member_ids_with_creator = [current_user.id] + [
-                uid for uid in data.member_ids if uid != current_user.id
-            ]
             
             # Добавляем участников
             for user_id in member_ids_with_creator:
@@ -57,6 +123,9 @@ async def create_group_chat(
             
             # Получаем информацию о группе
             return await _get_group_chat_detail(cursor, conn, group_id, current_user.id)
+    except Exception:
+        await conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -66,6 +135,11 @@ async def get_my_group_chats(
     current_user: UserInDB = Depends(get_current_user)
 ):
     """Получить список групповых чатов пользователя"""
+    await require_school_feature(
+        current_user,
+        "messages_enabled",
+        detail="Сообщения отключены в настройках школы",
+    )
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
@@ -73,11 +147,36 @@ async def get_my_group_chats(
                 SELECT 
                     gc.id, gc.name, gc.description, gc.created_by,
                     gc.photo_url, gc.created_at, gc.updated_at,
-                    COUNT(DISTINCT gcm.user_id) as member_count
+                    member_counts.member_count,
+                    last_message.id AS last_message_id,
+                    last_message.sender_id AS last_sender_id,
+                    last_message.content AS last_content,
+                    last_message.attachment_name AS last_attachment_name,
+                    last_message.created_at AS last_message_created_at,
+                    COALESCE(
+                        NULLIF(TRIM(BOTH '"' FROM sender_profile.full_name), ''),
+                        sender.username,
+                        'Unknown'
+                    ) AS last_sender_name
                 FROM group_chats gc
-                INNER JOIN group_chat_members gcm ON gc.id = gcm.group_chat_id
-                WHERE gcm.user_id = %s
-                GROUP BY gc.id
+                INNER JOIN group_chat_members own_membership
+                    ON own_membership.group_chat_id = gc.id
+                   AND own_membership.user_id = %s
+                LEFT JOIN (
+                    SELECT group_chat_id, COUNT(*) AS member_count
+                    FROM group_chat_members
+                    GROUP BY group_chat_id
+                ) member_counts ON member_counts.group_chat_id = gc.id
+                LEFT JOIN (
+                    SELECT group_chat_id, MAX(id) AS message_id
+                    FROM messages
+                    WHERE group_chat_id IS NOT NULL
+                    GROUP BY group_chat_id
+                ) latest ON latest.group_chat_id = gc.id
+                LEFT JOIN messages last_message ON last_message.id = latest.message_id
+                LEFT JOIN users sender ON sender.id = last_message.sender_id
+                LEFT JOIN profiles sender_profile
+                    ON sender_profile.user_id = last_message.sender_id
                 ORDER BY gc.updated_at DESC
             """, (current_user.id,))
             
@@ -85,30 +184,26 @@ async def get_my_group_chats(
             
             groups = []
             for row in rows:
-                # Получаем последнее сообщение
-                await cursor.execute("""
-                    SELECT id, sender_id, content, created_at
-                    FROM messages
-                    WHERE group_chat_id = %s
-                    ORDER BY created_at DESC
-                    LIMIT 1
-                """, (row["id"],))
-                last_msg = await cursor.fetchone()
-                
                 last_message = None
-                if last_msg:
-                    # Получаем имя отправителя
-                    await cursor.execute("""
-                        SELECT full_name FROM profiles WHERE user_id = %s
-                    """, (last_msg["sender_id"],))
-                    sender = await cursor.fetchone()
-                    
+                if row.get("last_message_id"):
+                    try:
+                        last_content = decrypt_message(row.get("last_content") or "")
+                    except Exception:
+                        last_content = ""
                     last_message = {
-                        "id": last_msg["id"],
-                        "sender_id": last_msg["sender_id"],
-                        "sender_name": sender["full_name"] if sender else "Unknown",
-                        "content": last_msg["content"],
-                        "created_at": last_msg["created_at"].isoformat() if last_msg["created_at"] else None,
+                        "id": row["last_message_id"],
+                        "sender_id": row["last_sender_id"],
+                        "sender_name": row["last_sender_name"],
+                        "content": (
+                            f"Файл: {row['last_attachment_name']}"
+                            if row.get("last_attachment_name") and not last_content
+                            else last_content
+                        ),
+                        "created_at": (
+                            row["last_message_created_at"].isoformat()
+                            if row.get("last_message_created_at")
+                            else None
+                        ),
                     }
                 
                 groups.append({
@@ -134,6 +229,11 @@ async def get_group_chat(
     current_user: UserInDB = Depends(get_current_user)
 ):
     """Получить информацию о групповом чате"""
+    await require_school_feature(
+        current_user,
+        "messages_enabled",
+        detail="Сообщения отключены в настройках школы",
+    )
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
@@ -207,6 +307,11 @@ async def update_group_chat(
     current_user: UserInDB = Depends(get_current_user)
 ):
     """Обновить информацию о групповом чате (только админы)"""
+    await require_school_feature(
+        current_user,
+        "messages_enabled",
+        detail="Сообщения отключены в настройках школы",
+    )
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
@@ -227,6 +332,11 @@ async def update_group_chat(
             params = []
             
             if data.name is not None:
+                if not data.name.strip():
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Group name is required",
+                    )
                 updates.append("name = %s")
                 params.append(data.name.strip())
             if data.description is not None:
@@ -257,6 +367,11 @@ async def add_members(
     current_user: UserInDB = Depends(get_current_user)
 ):
     """Добавить участников в группу (только админы)"""
+    await require_school_feature(
+        current_user,
+        "messages_enabled",
+        detail="Сообщения отключены в настройках школы",
+    )
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
@@ -269,10 +384,16 @@ async def add_members(
             
             if not member or member["role"] != "admin":
                 raise HTTPException(status_code=403, detail="Only admins can add members")
+
+            allowed_user_ids = await _ensure_group_members_allowed(
+                cursor,
+                current_user,
+                data.user_ids,
+            )
             
             # Добавляем участников
             added_count = 0
-            for user_id in data.user_ids:
+            for user_id in allowed_user_ids:
                 # Проверяем, не является ли уже участником
                 await cursor.execute("""
                     SELECT id FROM group_chat_members
@@ -290,6 +411,9 @@ async def add_members(
             await conn.commit()
             
             return await _get_group_chat_detail(cursor, conn, group_id, current_user.id)
+    except Exception:
+        await conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -301,6 +425,11 @@ async def remove_member(
     current_user: UserInDB = Depends(get_current_user)
 ):
     """Удалить участника из группы"""
+    await require_school_feature(
+        current_user,
+        "messages_enabled",
+        detail="Сообщения отключены в настройках школы",
+    )
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
@@ -343,6 +472,11 @@ async def delete_group_chat(
     current_user: UserInDB = Depends(get_current_user)
 ):
     """Удалить групповой чат (только создатель)"""
+    await require_school_feature(
+        current_user,
+        "messages_enabled",
+        detail="Сообщения отключены в настройках школы",
+    )
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
@@ -373,6 +507,11 @@ async def upload_group_photo(
     current_user: UserInDB = Depends(get_current_user)
 ):
     """Загрузить фото группы (только админы)"""
+    await require_school_feature(
+        current_user,
+        "messages_enabled",
+        detail="Сообщения отключены в настройках школы",
+    )
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
@@ -386,10 +525,11 @@ async def upload_group_photo(
             if not member or member["role"] != "admin":
                 raise HTTPException(status_code=403, detail="Only admins can upload group photo")
             
-            # Проверяем формат файла
-            ext = file.filename.split(".")[-1].lower() if file.filename else ""
-            if ext not in ["jpg", "jpeg", "png"]:
-                raise HTTPException(status_code=400, detail="Unsupported file type")
+            _, ext = validate_upload_metadata(
+                file,
+                allowed_exts=IMAGE_EXTS - {"gif", "webp"},
+                allowed_mime_prefixes=("image/",),
+            )
             
             # Создаем директорию для фото групп, если её нет
             group_photos_dir = os.path.join(settings.PROFILE_PHOTOS_DIR, "groups")
@@ -403,11 +543,10 @@ async def upload_group_photo(
             
             # Сохраняем новое фото
             path = os.path.join(group_photos_dir, f"{group_id}.{ext}")
-            with open(path, "wb") as buffer:
-                buffer.write(await file.read())
+            await save_upload_limited(file, path, max_bytes=MAX_IMAGE_BYTES)
             
             # Обновляем photo_url в базе данных
-            photo_url = f"/group_photo/{group_id}"
+            photo_url = f"{settings.API_V1_STR}/group-chats/{group_id}/photo"
             await cursor.execute("""
                 UPDATE group_chats
                 SET photo_url = %s

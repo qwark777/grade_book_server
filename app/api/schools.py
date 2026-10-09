@@ -5,6 +5,8 @@ from app.db.connection import get_db_connection
 from app.core.security import get_current_user
 from app.core.entitlements import get_school_id_for_user, has_admin_permission, get_admin_info, ADMIN_PERMISSIONS
 from app.models.user import User
+from datetime import datetime
+import json
 
 router = APIRouter(prefix="/schools")
 
@@ -33,6 +35,101 @@ class ClassBrief(BaseModel):
 class SchoolCreate(BaseModel):
     name: str
     address: Optional[str] = None
+
+
+DEFAULT_FEATURE_FLAGS = {
+    "messages_enabled": True,
+    "homeworks_enabled": True,
+    "ratings_enabled": True,
+    "teacher_feedback_enabled": True,
+    "parent_access_enabled": True,
+    "attendance_enabled": True,
+    "schedule_enabled": True,
+    "analytics_enabled": True,
+    "notifications_enabled": True,
+}
+
+DEFAULT_WORKFLOW_SETTINGS = {
+    "homework_review": {
+        "rework_enabled": True,
+        "labels": {
+            "pending": "Ждёт проверки",
+            "reviewed": "Проверено",
+            "rework": "На доработку",
+            "done_without_file": "Сделал",
+            "done_without_file_marked": "Отмечено как сделано",
+            "file_submitted": "Есть файл",
+        },
+    },
+    "final_grade_thresholds": {
+        "allow_teacher_override": True,
+        "thresholds": {
+            "3": 2.51,
+            "4": 3.51,
+            "5": 4.51,
+        },
+    },
+}
+
+
+class SchoolFeatureSettings(BaseModel):
+    feature_flags: dict[str, bool]
+    workflow_settings: dict
+    updated_at: Optional[datetime] = None
+
+
+class SchoolFeatureSettingsUpdate(BaseModel):
+    feature_flags: Optional[dict[str, bool]] = None
+    workflow_settings: Optional[dict] = None
+
+
+def _normalize_feature_flags(raw: Optional[dict]) -> dict[str, bool]:
+    merged = dict(DEFAULT_FEATURE_FLAGS)
+    if raw:
+        for key, value in raw.items():
+            if key in merged:
+                merged[key] = bool(value)
+    return merged
+
+
+def _normalize_workflow_settings(raw: Optional[dict]) -> dict:
+    merged = json.loads(json.dumps(DEFAULT_WORKFLOW_SETTINGS))
+    homework_review = raw.get("homework_review") if isinstance(raw, dict) else None
+    if isinstance(homework_review, dict):
+        merged["homework_review"]["rework_enabled"] = bool(
+            homework_review.get("rework_enabled", True)
+        )
+        labels = homework_review.get("labels")
+        if isinstance(labels, dict):
+            for key, default_value in merged["homework_review"]["labels"].items():
+                value = labels.get(key)
+                if isinstance(value, str) and value.strip():
+                    merged["homework_review"]["labels"][key] = value.strip()[:80]
+                else:
+                    merged["homework_review"]["labels"][key] = default_value
+
+    final_grade = raw.get("final_grade_thresholds") if isinstance(raw, dict) else None
+    if isinstance(final_grade, dict):
+        merged["final_grade_thresholds"]["allow_teacher_override"] = bool(
+            final_grade.get("allow_teacher_override", True)
+        )
+        raw_thresholds = final_grade.get("thresholds")
+        if isinstance(raw_thresholds, dict):
+            normalized_thresholds = dict(merged["final_grade_thresholds"]["thresholds"])
+            for key in ("3", "4", "5"):
+                value = raw_thresholds.get(key)
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                normalized_thresholds[key] = round(min(max(numeric, 2.0), 5.0), 2)
+            if (
+                normalized_thresholds["3"]
+                <= normalized_thresholds["4"]
+                <= normalized_thresholds["5"]
+            ):
+                merged["final_grade_thresholds"]["thresholds"] = normalized_thresholds
+    return merged
 
 
 @router.get("/", response_model=List[School])
@@ -124,6 +221,162 @@ async def update_school(school_id: int, payload: SchoolUpdate, current_user: Use
                 pass
             await cur.execute("SELECT id, name, address FROM schools WHERE id = %s", (school_id,))
             return await cur.fetchone()
+    finally:
+        conn.close()
+
+
+@router.get("/{school_id}/settings", response_model=SchoolFeatureSettings)
+async def get_school_settings(
+    school_id: int,
+    current_user: User = Depends(get_current_user),
+):
+    user_school_id = await get_school_id_for_user(current_user)
+    if current_user.role in ("owner", "superadmin", "root"):
+        pass
+    elif user_school_id != school_id:
+        raise HTTPException(status_code=403, detail="Access denied to this school")
+
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT feature_flags, workflow_settings, updated_at FROM school_settings WHERE school_id = %s",
+                (school_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                return SchoolFeatureSettings(
+                    feature_flags=dict(DEFAULT_FEATURE_FLAGS),
+                    workflow_settings=json.loads(json.dumps(DEFAULT_WORKFLOW_SETTINGS)),
+                )
+
+            raw_flags = row.get("feature_flags") if isinstance(row, dict) else row[0]
+            raw_workflow = row.get("workflow_settings") if isinstance(row, dict) else row[1]
+            if isinstance(raw_flags, str):
+                try:
+                    raw_flags = json.loads(raw_flags)
+                except Exception:
+                    raw_flags = {}
+            elif raw_flags is None:
+                raw_flags = {}
+
+            if isinstance(raw_workflow, str):
+                try:
+                    raw_workflow = json.loads(raw_workflow)
+                except Exception:
+                    raw_workflow = {}
+            elif raw_workflow is None:
+                raw_workflow = {}
+
+            updated_at = row.get("updated_at") if isinstance(row, dict) else row[2]
+            return SchoolFeatureSettings(
+                feature_flags=_normalize_feature_flags(raw_flags),
+                workflow_settings=_normalize_workflow_settings(raw_workflow),
+                updated_at=updated_at,
+            )
+    finally:
+        conn.close()
+
+
+@router.put("/{school_id}/settings", response_model=SchoolFeatureSettings)
+async def update_school_settings(
+    school_id: int,
+    payload: SchoolFeatureSettingsUpdate,
+    current_user: User = Depends(get_current_user),
+):
+    user_school_id = await get_school_id_for_user(current_user)
+    if current_user.role not in ("admin", "owner", "superadmin", "root"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if current_user.role == "admin" and user_school_id != school_id:
+        raise HTTPException(status_code=403, detail="Access denied to this school")
+
+    can_edit = await has_admin_permission(current_user, school_id, "edit_school")
+    if not can_edit:
+        raise HTTPException(status_code=403, detail="Нет права редактировать настройки школы")
+
+    user_id = current_user.id if hasattr(current_user, "id") else current_user.get("id")
+
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT feature_flags, workflow_settings FROM school_settings WHERE school_id = %s",
+                (school_id,),
+            )
+            existing = await cur.fetchone()
+
+            existing_flags = existing.get("feature_flags") if isinstance(existing, dict) else None
+            existing_workflow = existing.get("workflow_settings") if isinstance(existing, dict) else None
+            if isinstance(existing_flags, str):
+                try:
+                    existing_flags = json.loads(existing_flags)
+                except Exception:
+                    existing_flags = {}
+            if isinstance(existing_workflow, str):
+                try:
+                    existing_workflow = json.loads(existing_workflow)
+                except Exception:
+                    existing_workflow = {}
+
+            feature_flags = _normalize_feature_flags(
+                payload.feature_flags if payload.feature_flags is not None else existing_flags
+            )
+            workflow_settings = _normalize_workflow_settings(
+                payload.workflow_settings if payload.workflow_settings is not None else existing_workflow
+            )
+
+            await cur.execute(
+                """
+                INSERT INTO school_settings (school_id, feature_flags, workflow_settings, updated_by)
+                VALUES (%s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    feature_flags = VALUES(feature_flags),
+                    workflow_settings = VALUES(workflow_settings),
+                    updated_by = VALUES(updated_by),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    school_id,
+                    json.dumps(feature_flags),
+                    json.dumps(workflow_settings),
+                    user_id,
+                ),
+            )
+            await conn.commit()
+
+            try:
+                await cur.execute(
+                    """
+                    INSERT INTO audit_log (school_id, user_id, action, entity_type, entity_id, details)
+                    VALUES (%s, %s, 'school_settings_updated', 'school', %s, %s)
+                    """,
+                    (
+                        school_id,
+                        user_id,
+                        school_id,
+                        json.dumps(
+                            {
+                                "feature_flags": feature_flags,
+                                "workflow_settings": workflow_settings,
+                            }
+                        ),
+                    ),
+                )
+                await conn.commit()
+            except Exception:
+                pass
+
+            await cur.execute(
+                "SELECT feature_flags, workflow_settings, updated_at FROM school_settings WHERE school_id = %s",
+                (school_id,),
+            )
+            row = await cur.fetchone()
+            updated_at = row.get("updated_at") if isinstance(row, dict) else row[2]
+            return SchoolFeatureSettings(
+                feature_flags=feature_flags,
+                workflow_settings=workflow_settings,
+                updated_at=updated_at,
+            )
     finally:
         conn.close()
 
@@ -253,6 +506,15 @@ async def update_school_admin(
 
 @router.get("/{school_id}/classes", response_model=List[ClassBrief])
 async def classes_by_school(school_id: int, current_user=Depends(get_current_user)):
+    role = (
+        current_user.get("role")
+        if isinstance(current_user, dict)
+        else getattr(current_user, "role", None)
+    )
+    if role not in ("owner", "superadmin", "root"):
+        user_school_id = await get_school_id_for_user(current_user)
+        if user_school_id != school_id:
+            raise HTTPException(status_code=403, detail="Access denied")
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cur:
@@ -324,5 +586,3 @@ async def count_schools_without_admin(current_user=Depends(get_current_user)):
             return {"count": count}
     finally:
         conn.close()
-
-

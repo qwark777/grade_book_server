@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 
+from app.core.config import settings
 from app.core.security import get_current_user
 from app.db.connection import get_db_connection
 from app.models.user import User
@@ -19,6 +20,31 @@ def _extract_count(row) -> int:
     if isinstance(row, dict):
         return int(row.get("cnt", row.get("COUNT(*)", 0)) or 0)
     return int(row[0] if row else 0)
+
+
+def _row_value(row, key: str, index: int, default=None):
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return row[index] if index < len(row) else default
+
+
+async def _resolve_scope_school_id(cursor, current_user: User) -> Optional[int]:
+    if current_user.role not in ["admin", "owner", "superadmin", "root"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if current_user.role != "admin":
+        return None
+
+    await cursor.execute(
+        "SELECT school_id FROM school_admins WHERE admin_user_id = %s",
+        (current_user.id,),
+    )
+    row = await cursor.fetchone()
+    school_id = _row_value(row, "school_id", 0)
+    if school_id is None:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return int(school_id)
 
 
 class AttentionAlert(BaseModel):
@@ -72,7 +98,7 @@ async def get_recent_events(
     current_user: User = Depends(get_current_user)
 ):
     """Получить последние события школы (admin/owner)"""
-    if current_user.role not in ["admin", "owner", "superadmin"]:
+    if current_user.role not in ["admin", "owner", "superadmin", "root"]:
         raise HTTPException(status_code=403, detail="Access denied")
 
     conn = await get_db_connection()
@@ -80,17 +106,7 @@ async def get_recent_events(
 
     try:
         async with conn.cursor() as cursor:
-            school_id = None
-            if current_user.role == "admin":
-                await cursor.execute(
-                    "SELECT school_id FROM school_admins WHERE admin_user_id = %s",
-                    (current_user.id,)
-                )
-                row = await cursor.fetchone()
-                if row:
-                    school_id = row["school_id"] if isinstance(row, dict) else row[0]
-                else:
-                    return []
+            school_id = await _resolve_scope_school_id(cursor, current_user)
 
             school_filter = "AND c.school_id = %s" if school_id else ""
             date_filter = ""
@@ -212,6 +228,8 @@ async def get_recent_events(
 
             events.sort(key=lambda x: x.created_at, reverse=True)
             return events[:limit]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting recent events: {str(e)}")
     finally:
@@ -222,7 +240,7 @@ async def get_recent_events(
 async def get_attention_required(current_user: User = Depends(get_current_user)):
     """Получить список классов, требующих внимания"""
     # Проверяем права доступа
-    if current_user.role not in ["admin", "owner", "superadmin"]:
+    if current_user.role not in ["admin", "owner", "superadmin", "root"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     conn = await get_db_connection()
@@ -230,8 +248,11 @@ async def get_attention_required(current_user: User = Depends(get_current_user))
     
     try:
         async with conn.cursor() as cursor:
+            school_id = await _resolve_scope_school_id(cursor, current_user)
+            attendance_school_filter = "WHERE c.school_id = %s" if school_id else ""
+            attendance_params = (school_id,) if school_id else ()
             # 1. Находим классы с низкой посещаемостью (< 80%)
-            await cursor.execute("""
+            await cursor.execute(f"""
                 SELECT 
                     c.id as class_id,
                     c.name as class_name,
@@ -243,9 +264,10 @@ async def get_attention_required(current_user: User = Depends(get_current_user))
                 LEFT JOIN class_students cs ON c.id = cs.class_id
                 LEFT JOIN attendance a ON cs.student_id = a.student_id 
                     AND a.date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+                {attendance_school_filter}
                 GROUP BY c.id, c.name
                 HAVING total_attendance > 0
-            """)
+            """, attendance_params)
             
             attendance_rows = await cursor.fetchall()
             
@@ -270,7 +292,9 @@ async def get_attention_required(current_user: User = Depends(get_current_user))
                         ))
             
             # 2. Находим классы со снижением успеваемости
-            await cursor.execute("""
+            grade_school_filter = "AND c.school_id = %s" if school_id else ""
+            grade_params = (school_id,) if school_id else ()
+            await cursor.execute(f"""
                 SELECT 
                     c.id as class_id,
                     c.name as class_name,
@@ -287,9 +311,10 @@ async def get_attention_required(current_user: User = Depends(get_current_user))
                 JOIN grades g ON cs.student_id = g.student_id
                 JOIN users u ON u.id = g.student_id AND u.role = 'student'
                 WHERE g.date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+                {grade_school_filter}
                 GROUP BY c.id, c.name
                 HAVING current_avg IS NOT NULL
-            """)
+            """, grade_params)
             
             grade_rows = await cursor.fetchall()
             
@@ -337,6 +362,8 @@ async def get_attention_required(current_user: User = Depends(get_current_user))
             
             return alerts[:10]  # Возвращаем топ-10 самых важных
             
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting attention required: {str(e)}")
     finally:
@@ -347,7 +374,7 @@ async def get_attention_required(current_user: User = Depends(get_current_user))
 async def get_financial_stats(current_user: User = Depends(get_current_user)):
     """Получить финансовую статистику для администратора"""
     # Проверяем права доступа
-    if current_user.role not in ["admin", "owner", "superadmin"]:
+    if current_user.role not in ["admin", "owner", "superadmin", "root"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     conn = await get_db_connection()
@@ -355,33 +382,20 @@ async def get_financial_stats(current_user: User = Depends(get_current_user)):
     try:
         async with conn.cursor() as cursor:
             # Получаем school_id для админа (для owner будет None - все школы)
-            school_id = None
-            if current_user.role == "admin":
-                await cursor.execute("""
-                    SELECT school_id FROM school_admins WHERE admin_user_id = %s
-                """, (current_user.id,))
-                school_row = await cursor.fetchone()
-                if school_row:
-                    school_id = school_row["school_id"] if isinstance(school_row, dict) else school_row[0]
+            school_id = await _resolve_scope_school_id(cursor, current_user)
             
-            # 1. Общий доход - сумма всех транзакций типа "payment" или "deposit"
+            # 1. Общий доход - только оплаченные счета подписок школ
             if school_id:
-                # Для админа - только транзакции пользователей его школы
                 await cursor.execute("""
-                    SELECT COALESCE(SUM(bt.amount), 0) as total_revenue
-                    FROM balance_transactions bt
-                    JOIN users u ON bt.user_id = u.id
-                    JOIN class_students cs ON u.id = cs.student_id
-                    JOIN classes c ON cs.class_id = c.id
-                    WHERE bt.transaction_type IN ('payment', 'deposit')
-                    AND c.school_id = %s
+                    SELECT COALESCE(SUM(si.amount), 0) as total_revenue
+                    FROM subscription_invoices si
+                    WHERE si.school_id = %s AND si.status = 'paid'
                 """, (school_id,))
             else:
-                # Для owner - все транзакции
                 await cursor.execute("""
                     SELECT COALESCE(SUM(amount), 0) as total_revenue
-                    FROM balance_transactions
-                    WHERE transaction_type IN ('payment', 'deposit')
+                    FROM subscription_invoices
+                    WHERE status = 'paid'
                 """)
             
             revenue_row = await cursor.fetchone()
@@ -392,14 +406,17 @@ async def get_financial_stats(current_user: User = Depends(get_current_user)):
                 await cursor.execute("""
                     SELECT COUNT(*) as count
                     FROM school_subscriptions
-                    WHERE school_id = %s AND status = 'active'
-                """, (school_id,))
+                    WHERE school_id = %s
+                    AND status IN ('active', 'trial')
+                    AND current_period_end >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                """, (school_id, settings.SUBSCRIPTION_GRACE_DAYS))
             else:
                 await cursor.execute("""
                     SELECT COUNT(*) as count
                     FROM school_subscriptions
-                    WHERE status = 'active'
-                """)
+                    WHERE status IN ('active', 'trial')
+                    AND current_period_end >= DATE_SUB(NOW(), INTERVAL %s DAY)
+                """, (settings.SUBSCRIPTION_GRACE_DAYS,))
             
             subs_row = await cursor.fetchone()
             active_subscriptions = subs_row["count"] if isinstance(subs_row, dict) else subs_row[0]
@@ -432,6 +449,8 @@ async def get_financial_stats(current_user: User = Depends(get_current_user)):
                 overdue_payments=overdue_payments
             )
             
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting financial stats: {str(e)}")
     finally:
@@ -441,21 +460,13 @@ async def get_financial_stats(current_user: User = Depends(get_current_user)):
 @router.get("/dashboard-stats")
 async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
     """Ключевые показатели для дашборда: ученики, учителя, классы."""
-    if current_user.role not in ("admin", "owner", "superadmin"):
+    if current_user.role not in ("admin", "owner", "superadmin", "root"):
         raise HTTPException(status_code=403, detail="Access denied")
 
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
-            school_id = None
-            if current_user.role == "admin":
-                await cursor.execute(
-                    "SELECT school_id FROM school_admins WHERE admin_user_id = %s",
-                    (current_user.id,)
-                )
-                row = await cursor.fetchone()
-                if row:
-                    school_id = row["school_id"] if isinstance(row, dict) else row[0]
+            school_id = await _resolve_scope_school_id(cursor, current_user)
 
             # Классы
             if school_id:
@@ -479,8 +490,10 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
             # Учителя
             if school_id:
                 await cursor.execute("""
-                    SELECT COUNT(DISTINCT ct.teacher_id) as cnt FROM class_teachers ct
-                    JOIN classes c ON c.id = ct.class_id AND c.school_id = %s
+                    SELECT COUNT(DISTINCT su.user_id) as cnt
+                    FROM school_users su
+                    JOIN users u ON u.id = su.user_id AND u.role = 'teacher'
+                    WHERE su.school_id = %s AND su.role = 'teacher'
                 """, (school_id,))
             else:
                 await cursor.execute("SELECT COUNT(*) as cnt FROM users WHERE role = 'teacher'")
@@ -520,23 +533,14 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
 async def get_classes_count(current_user: User = Depends(get_current_user)):
     """Получить количество классов для администратора"""
     # Проверяем права доступа
-    if current_user.role not in ["admin", "owner", "superadmin"]:
+    if current_user.role not in ["admin", "owner", "superadmin", "root"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     conn = await get_db_connection()
     
     try:
         async with conn.cursor() as cursor:
-            school_id = None
-            if current_user.role == "admin":
-                # Получаем school_id для админа
-                await cursor.execute(
-                    "SELECT school_id FROM school_admins WHERE admin_user_id = %s",
-                    (current_user.id,)
-                )
-                result = await cursor.fetchone()
-                if result:
-                    school_id = result["school_id"] if isinstance(result, dict) else result[0]
+            school_id = await _resolve_scope_school_id(cursor, current_user)
             
             # Подсчитываем классы
             if school_id:
@@ -553,6 +557,8 @@ async def get_classes_count(current_user: User = Depends(get_current_user)):
             
             return {"count": count}
             
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting classes count: {str(e)}")
     finally:
@@ -567,7 +573,7 @@ async def get_financial_transactions(
 ):
     """Получить транзакции для финансового мониторинга (только для админов)"""
     # Проверяем права доступа
-    if current_user.role not in ["admin", "owner", "superadmin"]:
+    if current_user.role not in ["admin", "owner", "superadmin", "root"]:
         raise HTTPException(status_code=403, detail="Access denied")
     
     conn = await get_db_connection()
@@ -575,51 +581,42 @@ async def get_financial_transactions(
     try:
         async with conn.cursor() as cursor:
             # Получаем school_id для админа
-            school_id = None
-            if current_user.role == "admin":
-                await cursor.execute("""
-                    SELECT school_id FROM school_admins WHERE admin_user_id = %s
-                """, (current_user.id,))
-                school_row = await cursor.fetchone()
-                if school_row:
-                    school_id = school_row["school_id"] if isinstance(school_row, dict) else school_row[0]
+            school_id = await _resolve_scope_school_id(cursor, current_user)
             
-            # Получаем транзакции
+            # Получаем только счета подписок школ.
             if school_id:
                 await cursor.execute("""
-                    SELECT 
-                        bt.id,
-                        bt.user_id,
-                        COALESCE(TRIM(BOTH '"' FROM p.full_name), u.username) as user_name,
-                        bt.transaction_type,
-                        bt.amount,
-                        bt.currency,
-                        bt.description,
-                        bt.created_at
-                    FROM balance_transactions bt
-                    JOIN users u ON bt.user_id = u.id
-                    LEFT JOIN profiles p ON u.id = p.user_id
-                    JOIN class_students cs ON u.id = cs.student_id
-                    JOIN classes c ON cs.class_id = c.id
-                    WHERE c.school_id = %s
-                    ORDER BY bt.created_at DESC
+                    SELECT
+                        si.id,
+                        0 as user_id,
+                        s.name as user_name,
+                        CONCAT('subscription_', si.status) as transaction_type,
+                        si.amount,
+                        si.currency,
+                        CONCAT('Подписка ', sp.name) as description,
+                        COALESCE(si.paid_at, si.created_at) as created_at
+                    FROM subscription_invoices si
+                    JOIN schools s ON si.school_id = s.id
+                    JOIN subscription_plans sp ON si.plan_id = sp.id
+                    WHERE si.school_id = %s
+                    ORDER BY created_at DESC
                     LIMIT %s OFFSET %s
                 """, (school_id, limit, offset))
             else:
                 await cursor.execute("""
-                    SELECT 
-                        bt.id,
-                        bt.user_id,
-                        COALESCE(TRIM(BOTH '"' FROM p.full_name), u.username) as user_name,
-                        bt.transaction_type,
-                        bt.amount,
-                        bt.currency,
-                        bt.description,
-                        bt.created_at
-                    FROM balance_transactions bt
-                    JOIN users u ON bt.user_id = u.id
-                    LEFT JOIN profiles p ON u.id = p.user_id
-                    ORDER BY bt.created_at DESC
+                    SELECT
+                        si.id,
+                        0 as user_id,
+                        s.name as user_name,
+                        CONCAT('subscription_', si.status) as transaction_type,
+                        si.amount,
+                        si.currency,
+                        CONCAT('Подписка ', sp.name) as description,
+                        COALESCE(si.paid_at, si.created_at) as created_at
+                    FROM subscription_invoices si
+                    JOIN schools s ON si.school_id = s.id
+                    JOIN subscription_plans sp ON si.plan_id = sp.id
+                    ORDER BY created_at DESC
                     LIMIT %s OFFSET %s
                 """, (limit, offset))
             
@@ -639,6 +636,8 @@ async def get_financial_transactions(
                 for row in rows
             ]
             
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting financial transactions: {str(e)}")
     finally:
@@ -655,21 +654,13 @@ class FinancialChartData(BaseModel):
 @router.get("/financial-chart", response_model=FinancialChartData)
 async def get_financial_chart_data(current_user: User = Depends(get_current_user)):
     """Получить данные для графика выручки за последние 12 месяцев"""
-    if current_user.role not in ["admin", "owner", "superadmin"]:
+    if current_user.role not in ["admin", "owner", "superadmin", "root"]:
         raise HTTPException(status_code=403, detail="Access denied")
 
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
-            school_id = None
-            if current_user.role == "admin":
-                await cursor.execute(
-                    "SELECT school_id FROM school_admins WHERE admin_user_id = %s",
-                    (current_user.id,)
-                )
-                row = await cursor.fetchone()
-                if row:
-                    school_id = row["school_id"] if isinstance(row, dict) else row[0]
+            school_id = await _resolve_scope_school_id(cursor, current_user)
 
             # Генерируем список последних 12 месяцев
             today = datetime.now()
@@ -681,24 +672,21 @@ async def get_financial_chart_data(current_user: User = Depends(get_current_user
             # SQL для группировки по месяцам
             if school_id:
                 sql = """
-                    SELECT DATE_FORMAT(bt.created_at, '%Y-%m') as month, SUM(bt.amount) as total
-                    FROM balance_transactions bt
-                    JOIN users u ON bt.user_id = u.id
-                    JOIN class_students cs ON u.id = cs.student_id
-                    JOIN classes c ON cs.class_id = c.id
-                    WHERE bt.transaction_type IN ('payment', 'deposit')
-                    AND c.school_id = %s
-                    AND bt.created_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+                    SELECT DATE_FORMAT(COALESCE(paid_at, created_at), '%Y-%m') as month, SUM(amount) as total
+                    FROM subscription_invoices
+                    WHERE school_id = %s
+                    AND status = 'paid'
+                    AND COALESCE(paid_at, created_at) >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
                     GROUP BY month
                     ORDER BY month
                 """
                 params = (school_id,)
             else:
                 sql = """
-                    SELECT DATE_FORMAT(created_at, '%Y-%m') as month, SUM(amount) as total
-                    FROM balance_transactions
-                    WHERE transaction_type IN ('payment', 'deposit')
-                    AND created_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+                    SELECT DATE_FORMAT(COALESCE(paid_at, created_at), '%Y-%m') as month, SUM(amount) as total
+                    FROM subscription_invoices
+                    WHERE status = 'paid'
+                    AND COALESCE(paid_at, created_at) >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
                     GROUP BY month
                     ORDER BY month
                 """
@@ -740,6 +728,8 @@ async def get_financial_chart_data(current_user: User = Depends(get_current_user
                 currency="RUB"
             )
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting financial chart: {str(e)}")
     finally:

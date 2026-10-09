@@ -1,13 +1,17 @@
 """Admin features: audit log, notes, backup export, students import"""
 from typing import List, Optional
-import random
 import secrets
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from datetime import datetime
 
-from app.core.security import get_current_user, get_password_hash
+from app.core.security import get_current_user, get_password_hash, validate_password_strength
 from app.core.entitlements import get_school_id_for_user, has_admin_permission
+from app.core.subscription_limits import (
+    consume_school_quota,
+    ensure_school_capacity,
+    register_school_user,
+)
 from app.db.connection import get_db_connection
 from app.models.user import User
 
@@ -71,7 +75,7 @@ async def get_audit_log(
     current_user: User = Depends(get_current_user)
 ):
     """Get audit log for school. Admin only."""
-    if current_user.role not in ("admin", "owner", "superadmin"):
+    if current_user.role not in ("admin", "owner", "superadmin", "root"):
         raise HTTPException(403, "Forbidden")
     school_id = await _get_school_id(current_user)
     if current_user.role == "admin" and not school_id:
@@ -125,7 +129,7 @@ async def get_audit_log(
 @router.get("/notes", response_model=List[AdminNoteItem])
 async def get_admin_notes(current_user: User = Depends(get_current_user)):
     """Get admin quick notes for school."""
-    if current_user.role not in ("admin", "owner", "superadmin"):
+    if current_user.role not in ("admin", "owner", "superadmin", "root"):
         raise HTTPException(403, "Forbidden")
     school_id = await _get_school_id(current_user)
     if current_user.role == "admin" and not school_id:
@@ -160,7 +164,7 @@ async def get_admin_notes(current_user: User = Depends(get_current_user)):
 @router.post("/notes", status_code=201)
 async def create_admin_note(payload: AdminNoteCreate, current_user: User = Depends(get_current_user)):
     """Create admin note."""
-    if current_user.role not in ("admin", "owner", "superadmin"):
+    if current_user.role not in ("admin", "owner", "superadmin", "root"):
         raise HTTPException(403, "Forbidden")
     school_id = await _get_school_id(current_user)
     if current_user.role == "admin" and not school_id:
@@ -186,7 +190,7 @@ async def create_admin_note(payload: AdminNoteCreate, current_user: User = Depen
 @router.put("/notes/{note_id}")
 async def update_admin_note(note_id: int, payload: AdminNoteCreate, current_user: User = Depends(get_current_user)):
     """Update admin note."""
-    if current_user.role not in ("admin", "owner", "superadmin"):
+    if current_user.role not in ("admin", "owner", "superadmin", "root"):
         raise HTTPException(403, "Forbidden")
     school_id = await _get_school_id(current_user)
 
@@ -210,7 +214,7 @@ async def update_admin_note(note_id: int, payload: AdminNoteCreate, current_user
 @router.delete("/notes/{note_id}")
 async def delete_admin_note(note_id: int, current_user: User = Depends(get_current_user)):
     """Delete admin note."""
-    if current_user.role not in ("admin", "owner", "superadmin"):
+    if current_user.role not in ("admin", "owner", "superadmin", "root"):
         raise HTTPException(403, "Forbidden")
     school_id = await _get_school_id(current_user)
     if school_id is None:
@@ -237,7 +241,7 @@ async def export_school_backup(
     current_user: User = Depends(get_current_user)
 ):
     """Export school data as JSON backup. Admin only. Owner may pass school_id."""
-    if current_user.role not in ("admin", "owner", "superadmin"):
+    if current_user.role not in ("admin", "owner", "superadmin", "root"):
         raise HTTPException(403, "Forbidden")
     school_id = await _get_school_id(current_user)
     if school_id is None:
@@ -248,6 +252,12 @@ async def export_school_backup(
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cur:
+            await consume_school_quota(
+                cur,
+                school_id=school_id,
+                entitlement_key="exports.csv",
+                user_id=current_user.id,
+            )
             backup = {"exported_at": datetime.utcnow().isoformat(), "school_id": school_id, "data": {}}
 
             if school_id:
@@ -276,8 +286,13 @@ async def export_school_backup(
                 await cur.execute(f"SELECT * FROM class_students WHERE class_id IN ({placeholders})", tuple(class_ids))
                 backup["data"]["class_students"] = [dict(r) if hasattr(r, "keys") else {} for r in await cur.fetchall()]
 
+            await conn.commit()
             return backup
+    except HTTPException:
+        await conn.rollback()
+        raise
     except Exception as e:
+        await conn.rollback()
         raise HTTPException(500, str(e))
     finally:
         conn.close()
@@ -294,6 +309,16 @@ class StudentImportRequest(BaseModel):
     entries: List[StudentImportEntry]
 
 
+def _clean_profile_text(value: str | None) -> str:
+    return (value or "").strip().strip('"“”«»').strip()
+
+
+def _numeric_suffix(digits: int) -> str:
+    lower = 10 ** (digits - 1)
+    upper = 10**digits
+    return str(lower + secrets.randbelow(upper - lower))
+
+
 @router.post("/students/import")
 async def import_students(
     payload: StudentImportRequest,
@@ -306,7 +331,7 @@ async def import_students(
     sid = await _get_school_id(current_user)
     if sid is None:
         sid = school_id
-    if sid is None and current_user.role == "admin":
+    if sid is None:
         raise HTTPException(400, "Укажите school_id")
 
     conn = await get_db_connection()
@@ -314,24 +339,42 @@ async def import_students(
     errors = []
     try:
         async with conn.cursor() as cur:
+            requested_seats = sum(
+                1 for entry in payload.entries if entry.full_name.strip()
+            )
+            if requested_seats:
+                await ensure_school_capacity(
+                    cur,
+                    school_id=sid,
+                    resource="students",
+                    requested=requested_seats,
+                )
             for i, e in enumerate(payload.entries):
                 if not e.full_name or not e.full_name.strip():
                     errors.append(f"Строка {i+1}: пустое имя")
                     continue
-                full_name = e.full_name.strip()
+                full_name = _clean_profile_text(e.full_name)
+                if not full_name:
+                    errors.append(f"Строка {i+1}: пустое имя")
+                    continue
 
                 username = (e.username or "").strip()
                 if not username:
                     base = full_name.lower().replace(" ", "_").replace(".", "_")
-                    username = f"{base}_{random.randint(1000, 9999)}"
+                    username = f"{base}_{_numeric_suffix(4)}"
                 while True:
                     await cur.execute("SELECT id FROM users WHERE username=%s", (username,))
                     if await cur.fetchone():
-                        username = f"{username}_{random.randint(100, 999)}"
+                        username = f"{username}_{_numeric_suffix(3)}"
                     else:
                         break
 
                 password = (e.password or "").strip() or secrets.token_urlsafe(12)
+                try:
+                    validate_password_strength(password, username)
+                except ValueError as exc:
+                    errors.append(f"Строка {i+1}: {str(exc)}")
+                    continue
                 hashed = get_password_hash(password)
 
                 await cur.execute(
@@ -342,6 +385,12 @@ async def import_students(
                 await cur.execute(
                     "INSERT INTO profiles (user_id, full_name, work_place, location, bio) VALUES (%s, %s, '', '', '')",
                     (student_id, full_name)
+                )
+                await register_school_user(
+                    cur,
+                    school_id=sid,
+                    user_id=student_id,
+                    role="student",
                 )
 
                 class_name = (e.class_name or "").strip()

@@ -1,8 +1,9 @@
 """API для учебных периодов (семестров). Админ задаёт начало и конец периода."""
 from datetime import date
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.core.entitlements import get_school_id_for_user
 from app.core.security import get_current_user
 from app.db.connection import get_db_connection
 from pydantic import BaseModel
@@ -37,8 +38,33 @@ def _role(current_user) -> str:
 
 
 def _check_admin(current_user):
-    if _role(current_user) not in ("admin", "owner", "superadmin"):
+    if _role(current_user) not in ("admin", "owner", "superadmin", "root"):
         raise HTTPException(status_code=403, detail="Только админ может управлять периодами")
+
+
+async def _resolve_school_id(current_user, requested_school_id: Optional[int]) -> int:
+    role = _role(current_user)
+    if role in ("owner", "superadmin", "root"):
+        if requested_school_id is not None:
+            return int(requested_school_id)
+        conn = await get_db_connection()
+        try:
+            async with conn.cursor() as cursor:
+                await cursor.execute("SELECT id FROM schools ORDER BY id LIMIT 2")
+                rows = await cursor.fetchall()
+        finally:
+            conn.close()
+        if len(rows) == 1:
+            row = rows[0]
+            return int(row["id"] if isinstance(row, dict) else row[0])
+        raise HTTPException(status_code=400, detail="Укажите school_id")
+
+    school_id = await get_school_id_for_user(current_user)
+    if school_id is None:
+        raise HTTPException(status_code=403, detail="Пользователь не привязан к школе")
+    if requested_school_id is not None and int(requested_school_id) != int(school_id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этой школе")
+    return int(school_id)
 
 
 def _periods_overlap(start1: str, end1: str, start2: str, end2: str) -> bool:
@@ -49,10 +75,12 @@ def _periods_overlap(start1: str, end1: str, start2: str, end2: str) -> bool:
 @router.post("/academic-periods", response_model=AcademicPeriodResponse)
 async def create_academic_period(
     payload: AcademicPeriodCreate,
+    school_id: Optional[int] = Query(None),
     current_user=Depends(get_current_user),
 ):
     """Создать новый учебный период. Только для админа. Периоды не должны пересекаться."""
     _check_admin(current_user)
+    resolved_school_id = await _resolve_school_id(current_user, school_id)
     if payload.start_date > payload.end_date:
         raise HTTPException(status_code=400, detail="Дата начала не может быть позже даты окончания")
     conn = await get_db_connection()
@@ -61,7 +89,9 @@ async def create_academic_period(
             await cursor.execute(
                 """
                 SELECT start_date, end_date, name FROM academic_periods
-                """
+                WHERE school_id = %s
+                """,
+                (resolved_school_id,),
             )
             existing = await cursor.fetchall()
             for r in existing:
@@ -78,10 +108,17 @@ async def create_academic_period(
                     )
             await cursor.execute(
                 """
-                INSERT INTO academic_periods (name, start_date, end_date, is_active)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO academic_periods
+                    (school_id, name, start_date, end_date, is_active)
+                VALUES (%s, %s, %s, %s, %s)
                 """,
-                (payload.name, payload.start_date, payload.end_date, payload.is_active),
+                (
+                    resolved_school_id,
+                    payload.name,
+                    payload.start_date,
+                    payload.end_date,
+                    payload.is_active,
+                ),
             )
             await conn.commit()
             period_id = cursor.lastrowid
@@ -97,22 +134,31 @@ async def create_academic_period(
 
 
 @router.get("/academic-periods/current")
-async def get_current_academic_period(current_user=Depends(get_current_user)):
+async def get_current_academic_period(
+    school_id: Optional[int] = Query(None),
+    current_user=Depends(get_current_user),
+):
     """
     Текущий активный учебный период (семестр). Используется для ограничения
     отображения оценок и расписания до конца семестра.
     """
+    resolved_school_id = await _resolve_school_id(current_user, school_id)
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
+            today = date.today().isoformat()
             await cursor.execute(
                 """
                 SELECT id, name, start_date, end_date, is_active
                 FROM academic_periods
-                WHERE is_active = TRUE
+                WHERE school_id = %s
+                  AND is_active = TRUE
+                  AND start_date <= %s
+                  AND end_date >= %s
                 ORDER BY end_date DESC
                 LIMIT 1
-                """
+                """,
+                (resolved_school_id, today, today),
             )
             row = await cursor.fetchone()
             if not row:
@@ -121,9 +167,11 @@ async def get_current_academic_period(current_user=Depends(get_current_user)):
                     """
                     SELECT id, name, start_date, end_date, is_active
                     FROM academic_periods
+                    WHERE school_id = %s
                     ORDER BY end_date DESC
                     LIMIT 1
-                    """
+                    """,
+                    (resolved_school_id,),
                 )
                 row = await cursor.fetchone()
             if not row:
@@ -140,9 +188,13 @@ async def get_current_academic_period(current_user=Depends(get_current_user)):
 
 
 @router.get("/academic-periods", response_model=List[AcademicPeriodResponse])
-async def list_academic_periods(current_user=Depends(get_current_user)):
+async def list_academic_periods(
+    school_id: Optional[int] = Query(None),
+    current_user=Depends(get_current_user),
+):
     """Список всех учебных периодов. Только для админа/владельца."""
     _check_admin(current_user)
+    resolved_school_id = await _resolve_school_id(current_user, school_id)
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
@@ -150,8 +202,10 @@ async def list_academic_periods(current_user=Depends(get_current_user)):
                 """
                 SELECT id, name, start_date, end_date, is_active
                 FROM academic_periods
+                WHERE school_id = %s
                 ORDER BY start_date DESC
-                """
+                """,
+                (resolved_school_id,),
             )
             rows = await cursor.fetchall()
             return [
@@ -172,16 +226,22 @@ async def list_academic_periods(current_user=Depends(get_current_user)):
 async def update_academic_period(
     period_id: int,
     payload: AcademicPeriodUpdate,
+    school_id: Optional[int] = Query(None),
     current_user=Depends(get_current_user),
 ):
     """Обновить учебный период (в т.ч. конец семестра). Только для админа. Периоды не должны пересекаться."""
     _check_admin(current_user)
+    resolved_school_id = await _resolve_school_id(current_user, school_id)
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
             await cursor.execute(
-                "SELECT start_date, end_date, name FROM academic_periods WHERE id = %s",
-                (period_id,),
+                """
+                SELECT start_date, end_date, name
+                FROM academic_periods
+                WHERE id = %s AND school_id = %s
+                """,
+                (period_id, resolved_school_id),
             )
             current = await cursor.fetchone()
             if not current:
@@ -193,8 +253,12 @@ async def update_academic_period(
                 raise HTTPException(status_code=400, detail="Дата начала не может быть позже даты окончания")
 
             await cursor.execute(
-                "SELECT id, start_date, end_date, name FROM academic_periods WHERE id != %s",
-                (period_id,),
+                """
+                SELECT id, start_date, end_date, name
+                FROM academic_periods
+                WHERE id != %s AND school_id = %s
+                """,
+                (period_id, resolved_school_id),
             )
             others = await cursor.fetchall()
             for r in others:
@@ -223,10 +287,14 @@ async def update_academic_period(
             params.append(payload.is_active)
         if not updates:
             return {"message": "Nothing to update"}
-        params.append(period_id)
+        params.extend((period_id, resolved_school_id))
         async with conn.cursor() as cursor:
             await cursor.execute(
-                f"UPDATE academic_periods SET {', '.join(updates)} WHERE id = %s",
+                f"""
+                UPDATE academic_periods
+                SET {', '.join(updates)}
+                WHERE id = %s AND school_id = %s
+                """,
                 tuple(params),
             )
             if cursor.rowcount == 0:

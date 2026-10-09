@@ -10,7 +10,7 @@ import os
 # Add the app directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'app'))
 
-from app.db.connection import get_db_connection
+from app.db.connection import close_db_pool, get_db_connection
 from app.core.entitlements import check_entitlement, get_school_id_for_user
 from app.models.user import User
 
@@ -67,6 +67,7 @@ async def test_subscription_system():
                 
     finally:
         conn.close()
+        await close_db_pool()
     
     print("\nSubscription system test completed!")
 

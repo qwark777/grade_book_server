@@ -8,10 +8,6 @@ async def seed_subscription_plans():
     conn = await get_db_connection()
     try:
         async with conn.cursor() as cursor:
-            # Clear existing data
-            await cursor.execute("DELETE FROM plan_entitlements")
-            await cursor.execute("DELETE FROM subscription_plans")
-            
             # Insert subscription plans
             plans_data = [
                 {
@@ -19,45 +15,47 @@ async def seed_subscription_plans():
                     "description": "Базовый план для небольших школ",
                     "price_monthly": 0.0,
                     "price_yearly": 0.0,
-                    "currency": "USD"
+                    "currency": "USD",
+                    "is_active": True,
                 },
                 {
                     "name": "Pro",
                     "description": "Полнофункциональный план для школ",
                     "price_monthly": 50.0,
                     "price_yearly": 500.0,
-                    "currency": "USD"
+                    "currency": "USD",
+                    "is_active": True,
                 },
                 {
                     "name": "Enterprise",
                     "description": "План для сетей школ и владельцев",
                     "price_monthly": 200.0,
                     "price_yearly": 2000.0,
-                    "currency": "USD"
-                },
-                {
-                    "name": "Student Plus",
-                    "description": "Дополнительные возможности для учеников",
-                    "price_monthly": 5.0,
-                    "price_yearly": 50.0,
-                    "currency": "USD"
-                },
-                {
-                    "name": "Teacher Pro",
-                    "description": "Расширенные инструменты для учителей",
-                    "price_monthly": 10.0,
-                    "price_yearly": 100.0,
-                    "currency": "USD"
+                    "currency": "USD",
+                    "is_active": True,
                 }
             ]
             
             plan_ids = {}
             for plan_data in plans_data:
                 await cursor.execute("""
-                    INSERT INTO subscription_plans (name, description, price_monthly, price_yearly, currency)
-                    VALUES (%(name)s, %(description)s, %(price_monthly)s, %(price_yearly)s, %(currency)s)
+                    INSERT INTO subscription_plans
+                    (name, description, price_monthly, price_yearly, currency, is_active)
+                    VALUES
+                    (%(name)s, %(description)s, %(price_monthly)s, %(price_yearly)s, %(currency)s, %(is_active)s)
+                    ON DUPLICATE KEY UPDATE
+                        description = %(description)s,
+                        price_monthly = %(price_monthly)s,
+                        price_yearly = %(price_yearly)s,
+                        currency = %(currency)s,
+                        is_active = %(is_active)s
                 """, plan_data)
-                plan_id = cursor.lastrowid
+                await cursor.execute(
+                    "SELECT id FROM subscription_plans WHERE name = %s",
+                    (plan_data["name"],),
+                )
+                plan_row = await cursor.fetchone()
+                plan_id = plan_row["id"]
                 plan_ids[plan_data["name"]] = plan_id
             
             # Insert entitlements for each plan
@@ -113,20 +111,6 @@ async def seed_subscription_plans():
                 ("Enterprise", "api.access", "true"),
                 ("Enterprise", "multi.school", "true"),
                 ("Enterprise", "owner.dashboard", "true"),
-                
-                # Student Plus entitlements
-                ("Student Plus", "ai.personal", "true"),
-                ("Student Plus", "goals.tracking", "true"),
-                ("Student Plus", "parent.reports", "true"),
-                ("Student Plus", "study.analytics", "true"),
-                ("Student Plus", "achievements.extra", "true"),
-                
-                # Teacher Pro entitlements
-                ("Teacher Pro", "reports.subject", "true"),
-                ("Teacher Pro", "exports.advanced", "true"),
-                ("Teacher Pro", "grading.templates", "true"),
-                ("Teacher Pro", "analytics.subject", "true"),
-                ("Teacher Pro", "bulk.operations", "true")
             ]
             
             for plan_name, entitlement_key, entitlement_value in entitlements_data:
@@ -134,7 +118,14 @@ async def seed_subscription_plans():
                 await cursor.execute("""
                     INSERT INTO plan_entitlements (plan_id, entitlement_key, entitlement_value)
                     VALUES (%s, %s, %s)
-                """, (plan_id, entitlement_key, entitlement_value))
+                    ON DUPLICATE KEY UPDATE
+                        entitlement_value = %s
+                """, (
+                    plan_id,
+                    entitlement_key,
+                    entitlement_value,
+                    entitlement_value,
+                ))
             
             await conn.commit()
             print("Subscription plans and entitlements seeded successfully")
@@ -191,6 +182,21 @@ async def main():
     await seed_subscription_plans()
     await create_default_subscriptions()
     print("Subscription seeding completed!")
+
+
+async def ensure_subscription_data():
+    """Initialize the catalog once and give unsubscribed schools a trial."""
+    conn = await get_db_connection()
+    try:
+        async with conn.cursor() as cursor:
+            await cursor.execute("SELECT COUNT(*) AS count FROM subscription_plans")
+            row = await cursor.fetchone()
+            count = row["count"] if isinstance(row, dict) else row[0]
+    finally:
+        conn.close()
+    if int(count or 0) == 0:
+        await seed_subscription_plans()
+    await create_default_subscriptions()
 
 
 if __name__ == "__main__":

@@ -105,7 +105,7 @@ class TimetableChange(BaseModel):
 # ================== ОТВЕТЫ API ==================
 
 class LessonItem(BaseModel):
-    lesson_number: int
+    lesson_number: Optional[int] = None
     start_time: str  # "08:00"
     end_time: str    # "08:45"
     subject: str
@@ -115,6 +115,12 @@ class LessonItem(BaseModel):
     change_reason: Optional[str] = None
     class_id: Optional[int] = None  # для учителя: ID класса
     subject_id: Optional[int] = None  # для учителя: ID предмета
+    teacher_id: Optional[int] = None  # для ученика/учителя: ID преподавателя
+    is_paid_lesson: bool = False
+    paid_lesson_id: Optional[int] = None
+    paid_lesson_session_id: Optional[int] = None
+    paid_lesson_status: Optional[str] = None
+    remaining_lessons: Optional[int] = None
 
 
 class DaySchedule(BaseModel):

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, UTC
 from typing import Dict
 
 from passlib.context import CryptContext
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException, status, Depends
 from fastapi.security import OAuth2PasswordBearer
 
@@ -19,6 +19,24 @@ warnings.filterwarnings('ignore', message='.*bcrypt.*', category=UserWarning)
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+WEAK_PASSWORDS = {
+    "123",
+    "1234",
+    "12345",
+    "123456",
+    "1234567",
+    "12345678",
+    "123456789",
+    "qwerty",
+    "qweqwe",
+    "password",
+    "пароль",
+    "admin",
+    "administrator",
+    "gradebook",
+    "changeme",
+    "change_me",
+}
 
 # Encryption
 fernet = Fernet(settings.ENCRYPTION_KEY.encode())
@@ -34,6 +52,18 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
+def validate_password_strength(password: str, username: str | None = None) -> None:
+    normalized = (password or "").strip().lower()
+    normalized_username = (username or "").strip().lower()
+
+    if len(password or "") < 8:
+        raise ValueError("Password must be at least 8 characters long")
+    if normalized in WEAK_PASSWORDS:
+        raise ValueError("Password is too common")
+    if normalized_username and normalized == normalized_username:
+        raise ValueError("Password must not match username")
+
+
 def encrypt_message(message: str) -> str:
     """Encrypt message"""
     return fernet.encrypt(message.encode()).decode()
@@ -41,7 +71,12 @@ def encrypt_message(message: str) -> str:
 
 def decrypt_message(encrypted_message: str) -> str:
     """Decrypt message"""
-    return fernet.decrypt(encrypted_message.encode()).decode()
+    try:
+        return fernet.decrypt(encrypted_message.encode()).decode()
+    except (InvalidToken, UnicodeDecodeError):
+        # Old messages can become unreadable after an encryption-key rotation.
+        # One damaged row must not make the whole conversations endpoint fail.
+        return "[Сообщение недоступно]"
 
 
 def create_access_token(data: Dict) -> str:
@@ -130,5 +165,3 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         raise credentials_exception
     
     return user
-
-

@@ -1,9 +1,30 @@
 import logging
+import os
 from app.core.config import settings
 from app.core.security import get_password_hash
 from app.db.connection import get_db_connection
 
 logger = logging.getLogger(__name__)
+
+_PLACEHOLDER_OWNER_PASSWORDS = {
+    "change_me",
+    "changeme",
+    "change_me_to_a_long_random_value",
+    "replace_with_long_random_owner_password",
+    "password",
+    "admin",
+    "owner",
+}
+
+
+def _allow_insecure_dev_defaults() -> bool:
+    return os.getenv("ALLOW_INSECURE_DEV_DEFAULTS", "").lower() in ("1", "true", "yes")
+
+
+def _is_unsafe_initial_owner_password(password: str) -> bool:
+    normalized = (password or "").strip().lower()
+    return len(password or "") < 12 or normalized in _PLACEHOLDER_OWNER_PASSWORDS
+
 
 async def create_first_owner() -> None:
     """Create a default superuser/owner if DB is empty users-wise"""
@@ -15,9 +36,27 @@ async def create_first_owner() -> None:
             existing_user = await cursor.fetchone()
             
             if not existing_user:
+                if not settings.FIRST_SUPERUSER or not settings.FIRST_SUPERUSER_PASSWORD:
+                    logger.warning(
+                        "No users found, but FIRST_SUPERUSER/OWNER_PASSWORD is not configured. "
+                        "Skipping automatic owner creation."
+                    )
+                    return
+
                 logger.info("No users found. Creating first owner user.")
                 username = settings.FIRST_SUPERUSER
                 password = settings.FIRST_SUPERUSER_PASSWORD
+                if (
+                    _is_unsafe_initial_owner_password(password)
+                    and not _allow_insecure_dev_defaults()
+                ):
+                    logger.error(
+                        "Refusing to create first owner with an unsafe placeholder "
+                        "or short password. Set OWNER_PASSWORD/FIRST_SUPERUSER_PASSWORD "
+                        "to a long random value."
+                    )
+                    return
+
                 hashed_password = get_password_hash(password)
                 role = "owner"
                 
@@ -34,11 +73,6 @@ async def create_first_owner() -> None:
                 )
                 
                 await conn.commit()
-                # Print to console as well to be sure it's seen
-                print(f"----- FIRST OWNER CREATED -----")
-                print(f"Username: {username}")
-                print(f"Password: {password}")
-                print(f"-------------------------------")
                 logger.info(f"First owner created: username={username}")
             else:
                 logger.info("Users already exist. Skipping first owner creation.")

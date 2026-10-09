@@ -60,20 +60,6 @@ class SchoolSubscription(BaseModel):
         from_attributes = True
 
 
-class UserSubscription(BaseModel):
-    id: int
-    user_id: int
-    plan_id: int
-    status: SubscriptionStatus
-    current_period_start: datetime
-    current_period_end: datetime
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
 class UsageEvent(BaseModel):
     id: int
     school_id: int
@@ -97,6 +83,12 @@ class SubscriptionInvoice(BaseModel):
     period_start: datetime
     period_end: datetime
     due_date: datetime
+    payment_method: Optional[str] = None
+    provider_payment_id: Optional[str] = None
+    payment_note: Optional[str] = None
+    confirmed_by_user_id: Optional[int] = None
+    confirmed_by_username: Optional[str] = None
+    confirmed_by_full_name: Optional[str] = None
     paid_at: Optional[datetime] = None
     created_at: datetime
 
